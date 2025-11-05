@@ -12,6 +12,7 @@
 
 #include <Trade/Trade.mqh>
 #include <Trade/DealInfo.mqh>
+#include <AI_MarketRange.mqh>
 
 //+------------------------------------------------------------------+
 //| Nhóm cài ??t chung                                                |
@@ -190,8 +191,18 @@ input int MonthStartFirstTradeHour = 2;        // Gi? ??u tiên giao d?ch ??u th
 input bool CloseTradesBeforeMonthEnd = true;   // ?óng l?nh tr??c cu?i tháng
 input double MonthEndMinProfitToClose = 0;     // L?i nhu?n t?i thi?u ?? ?óng l?nh cu?i tháng
 
+//+------------------------------------------------------------------+
+//| AI Market Range Integration                                      |
+//+------------------------------------------------------------------+
+input group "===== AI MARKET RANGE ====="
+input bool RequireAIConnection = false;        // Yêu c?u k?t n?i AI (true = không trading n?u AI offline)
+input int AIThresholdUpdateInterval = 60;      // Th?i gian c?p nh?t AI Threshold (giây)
+
 
 // Rest of the global variables remain the same
+// AI Threshold - bi?n toàn c?c ???c c?p nh?t t? AI
+double g_CurrentAIThreshold = 15000;  // Giá tr? m?c ??nh b?ng MarketRangeThreshold
+datetime g_LastThresholdUpdate = 0;   // Th?i gian c?p nh?t threshold cu?i cùng
 
 double g_WeeklyRangeAverage = 0;
 bool g_startBuy = true;
@@ -1012,7 +1023,7 @@ void HandleHedging(double currentPrice) {
     
     // Get current market range
     double marketRange = CalculateMarketRange();
-    double rangeFactor = marketRange / MarketRangeThreshold;
+    double rangeFactor = marketRange / g_CurrentAIThreshold;
     
     // Adjust threshold based on market range
     double adjustedBuyThreshold = HedgingThreshold * (rangeFactor >= 1.0 ? rangeFactor : 1.0);
@@ -2203,10 +2214,10 @@ bool HasEnoughTimeForNewOrder() {
 }
 
 
-double CalculateMarketRange() {
+double CalculateTraditionalMarketRange() {
     static datetime lastCalculation = 0;
     static double lastRange = 0;
-    
+
     // Ch? tính toán l?i sau m?i 5 phút thay vì nhi?u l?n m?i tick
     if(TimeCurrent() - lastCalculation < 300 && lastRange > 0) {
         return lastRange;
@@ -2266,11 +2277,11 @@ double CalculateMarketRange() {
     d1ATR /= 2;
 
     // ?i?u ch?nh tr?ng s? d?a trên ATR
-    if(d1ATR > MarketRangeThreshold * 1.5) {
+    if(d1ATR > g_CurrentAIThreshold * 1.5) {
         // Th? tr??ng bi?n ??ng m?nh - ?u tiên range ng?n h?n
         weightedRange = (h1Range * 0.5 + h4Range * 0.3 + d1Range * 0.2);
     }
-    else if(d1ATR > MarketRangeThreshold) {
+    else if(d1ATR > g_CurrentAIThreshold) {
         // Th? tr??ng bi?n ??ng v?a - cân b?ng các range
         weightedRange = (h1Range * 0.4 + h4Range * 0.4 + d1Range * 0.2);
     }
@@ -2282,9 +2293,9 @@ double CalculateMarketRange() {
     // Gi?m l??ng ghi log - ch? in khi th?c s? c?n thi?t
     static datetime lastLogTime = 0;
     static double lastLoggedRange = 0;
-    
+
     // Ch? log m?i 30 phút ho?c khi giá tr? thay ??i l?n
-    if(TimeCurrent() - lastLogTime > 1800 || MathAbs(lastLoggedRange - weightedRange) > MarketRangeThreshold * 0.2) {
+    if(TimeCurrent() - lastLogTime > 1800 || MathAbs(lastLoggedRange - weightedRange) > g_CurrentAIThreshold * 0.2) {
            
         lastLogTime = TimeCurrent();
         lastLoggedRange = weightedRange;
@@ -2292,11 +2303,46 @@ double CalculateMarketRange() {
 
     lastCalculation = TimeCurrent();
     lastRange = weightedRange;
-    
+
     return weightedRange;
 }
 
+//+------------------------------------------------------------------+
+//| NEW: AI-enabled wrapper function for CalculateMarketRange       |
+//+------------------------------------------------------------------+
+double CalculateMarketRange() {
+    return CalculateMarketRangeWithAI();
+}
 
+//+------------------------------------------------------------------+
+//| Update AI Threshold - C?p nh?t ng??ng AI ??ng                    |
+//+------------------------------------------------------------------+
+void UpdateAIThreshold() {
+    // Ki?m tra th?i gian c?p nh?t
+    if(TimeCurrent() - g_LastThresholdUpdate < AIThresholdUpdateInterval) {
+        return; // Ch?a ??n th?i gian c?p nh?t
+    }
+
+    // L?y giá tr? market range hi?n t?i t? AI
+    double currentRange = CalculateMarketRange();
+
+    // N?u l?y ???c giá tr? h?p l?, c?p nh?t threshold
+    if(currentRange > 0) {
+        g_CurrentAIThreshold = currentRange;
+        g_LastThresholdUpdate = TimeCurrent();
+
+        Print("✅ AI Threshold Updated: ", g_CurrentAIThreshold,
+              " (Was: ", MarketRangeThreshold, ")");
+    }
+    else {
+        // N?u không l?y ???c t? AI, gi? nguyên giá tr? c? ho?c dùng m?c ??nh
+        if(g_CurrentAIThreshold == 0) {
+            g_CurrentAIThreshold = MarketRangeThreshold;
+        }
+
+        Print("⚠️ AI Threshold not updated, using: ", g_CurrentAIThreshold);
+    }
+}
 
 // Function to check if current time is within news protection period
 bool IsWithinNewsTime() {
@@ -2502,9 +2548,9 @@ bool IsTrendModeValid() {
     
     double marketRange = CalculateMarketRange();
     double momentum = MathAbs(CalculateMarketMomentum());
-    
-    // Ki?m tra c? bi?n ??ng và momentum 
-    if(marketRange > MarketRangeThreshold && momentum > MomentumEntryThreshold) {
+
+    // Ki?m tra c? bi?n ??ng và momentum
+    if(marketRange > g_CurrentAIThreshold && momentum > MomentumEntryThreshold) {
         highVolCount++;
         lowVolCount = 0;
     } else {
@@ -4359,10 +4405,10 @@ double CalculateTrendLotSize(double baseSize, double priceDistance) {
     
     // Add market condition adjustments
     double marketRange = CalculateMarketRange();
-    if(marketRange > MarketRangeThreshold * 1.5) {
+    if(marketRange > g_CurrentAIThreshold * 1.5) {
         multiplier = 1; // Reduce size in high volatility
     }
-    else if(marketRange > MarketRangeThreshold) {
+    else if(marketRange > g_CurrentAIThreshold) {
         multiplier = 1; // Slightly reduce size in moderate volatility
     }
     
@@ -4496,6 +4542,30 @@ bool IsSpreadOK() {
    if(currentSpread > MaxSpread) {
       return false;
    }
+   return true;
+}
+
+//+------------------------------------------------------------------+
+//| Check if AI connection is OK (for testing AI integration)       |
+//+------------------------------------------------------------------+
+bool IsAIConnectionOK() {
+   // N?u không yêu c?u AI → cho phép trading
+   if(!RequireAIConnection) {
+      return true;
+   }
+
+   // N?u yêu c?u AI → ki?m tra tr?ng thái
+   if(!g_APIAvailable) {
+      static datetime lastWarning = 0;
+      // Log warning m?i 5 phút
+      if(TimeCurrent() - lastWarning > 300) {
+         Print("⛔ TRADING DISABLED: AI connection required but API is offline!");
+         Print("   Set RequireAIConnection = false to allow trading without AI");
+         lastWarning = TimeCurrent();
+      }
+      return false;
+   }
+
    return true;
 }
 
@@ -4691,7 +4761,7 @@ MarketCondition AnalyzeMarketCondition(ENUM_POSITION_TYPE posType) {
                       (rates[0].close > rates[1].high && rates[1].close > rates[2].high);
                       
     // Ki?m tra m?c ?? bi?n ??ng
-    condition.isVolatile = volatility > MarketRangeThreshold/2;
+    condition.isVolatile = volatility > g_CurrentAIThreshold/2;
     
     // Ki?m tra ??o chi?u
     if(posType == POSITION_TYPE_BUY) {
@@ -5065,10 +5135,10 @@ double CalculateHedgeTP(ENUM_ORDER_TYPE orderType, double entryPrice) {
     double momentum = MathAbs(CalculateMarketMomentum());
     
     // Adjust TP based on market conditions
-    if(marketRange > MarketRangeThreshold * 1.5) {
+    if(marketRange > g_CurrentAIThreshold * 1.5) {
         baseTP *= 1.5; // Increase TP in high volatility
     }
-    else if(marketRange > MarketRangeThreshold) {
+    else if(marketRange > g_CurrentAIThreshold) {
         baseTP *= 1.2; // Slightly increase TP in moderate volatility
     }
     
@@ -5112,11 +5182,11 @@ int CountHedgeOrders(ENUM_POSITION_TYPE posType) {
 double AdjustExtraDistance(double baseExtra, double marketRange) {
     double adjusted = baseExtra;
     
-    if(marketRange > MarketRangeThreshold * 1.5) {
+    if(marketRange > g_CurrentAIThreshold * 1.5) {
         // Very high volatility - increase extra distance significantly
         adjusted *= HighRangeMultiplier * 1.5;
     }
-    else if(marketRange > MarketRangeThreshold) {
+    else if(marketRange > g_CurrentAIThreshold) {
         // High volatility - increase extra distance
         adjusted *= HighRangeMultiplier;
     }
@@ -5232,10 +5302,10 @@ double GetSafeHedgeDCADistance() {
     double momentum = MathAbs(CalculateMarketMomentum());
     
     // Adjust distance based on market conditions
-    if(marketRange > MarketRangeThreshold * 1.5) {
+    if(marketRange > g_CurrentAIThreshold * 1.5) {
         baseDistance = FirstOrderGap * 1; // Double distance in very high volatility
     }
-    else if(marketRange > MarketRangeThreshold) {
+    else if(marketRange > g_CurrentAIThreshold) {
         baseDistance = FirstOrderGap * 1; // Increase distance in high volatility
     }
     
@@ -6369,7 +6439,7 @@ double GetPeriodExtraDistance() {
     
     // Get market volatility state
     double marketRange = CalculateMarketRange();
-    bool isHighVolatility = marketRange > MarketRangeThreshold;
+    bool isHighVolatility = marketRange > g_CurrentAIThreshold;
     
     // Calculate base extra distance based on time period
     double baseExtraDistance;
@@ -6704,13 +6774,13 @@ bool GetOptimalCycleParameters(ENUM_POSITION_TYPE posType, double &entryPrice, d
     double momentum = CalculateMarketMomentum();
     
     // Adjust entry based on market conditions
-    if(marketRange > MarketRangeThreshold) {
+    if(marketRange > g_CurrentAIThreshold) {
         // In high volatility, wait for better entry
         if(posType == POSITION_TYPE_BUY && momentum > 0) return false;
         if(posType == POSITION_TYPE_SELL && momentum < 0) return false;
         
         // Adjust volume based on volatility
-        volume *= (marketRange > MarketRangeThreshold * 1.5) ? 0.8 : 0.9;
+        volume *= (marketRange > g_CurrentAIThreshold * 1.5) ? 0.8 : 0.9;
     }
     
     // Check existing positions distribution
@@ -7629,7 +7699,15 @@ ArraySetAsSeries(g_ADX_Buffer, true);
     ObjectSetInteger(0, infoLabelName, OBJPROP_FONTSIZE, 10);
     ObjectSetInteger(0, infoLabelName, OBJPROP_COLOR, clrWhite);
     ObjectSetInteger(0, infoLabelName, OBJPROP_ANCHOR, ANCHOR_LEFT_LOWER);
-    
+
+    // Initialize AI Integration
+    InitAIIntegration();
+
+    // Initialize AI Threshold v?i giá tr? m?c ??nh
+    g_CurrentAIThreshold = MarketRangeThreshold;
+    g_LastThresholdUpdate = 0;
+    Print("🎯 AI Threshold initialized: ", g_CurrentAIThreshold);
+
     return(INIT_SUCCEEDED);
 }
 
@@ -9373,7 +9451,7 @@ void ManageTrendFollowing() {
     double momentum = MathAbs(CalculateMarketMomentum());
     
     // Additional trend confirmation checks
-    bool strongMarketMovement = marketRange > MarketRangeThreshold && 
+    bool strongMarketMovement = marketRange > g_CurrentAIThreshold && 
                                momentum > MomentumEntryThreshold;
     
     // Get optimal direction based on market analysis with high confidence threshold
@@ -9955,8 +10033,10 @@ void OnTradeTransaction(const MqlTradeTransaction& trans,
 void OnTick() {
     // =============================================================================
     // 1. KIỂM TRA ĐIỀU KIỆN CƠ BẢN
-  
-  
+
+    // C?p nh?t AI Threshold (t? ??ng ki?m tra interval b?n trong hàm)
+    UpdateAIThreshold();
+
     // =============================================================================
     // Sau khi xác định g_InsideBox
         double currentPrice = GetCleanPrice();
@@ -9964,7 +10044,7 @@ void OnTick() {
 HandleCycleCompletion();
 
 // CHECK: Nếu đang chờ hoàn thành cycle cũ → BLOCK logic mới
-if(g_WaitingForCycleCompletion && g_InsideBox<MarketRangeThreshold) {
+if(g_WaitingForCycleCompletion && g_InsideBox<g_CurrentAIThreshold) {
     ActiveTradeType activeType = GetActiveTradeType();
     
     // Nếu có lệnh sideway nhưng đã outside box → Tiếp tục DCA sideway
@@ -9981,7 +10061,7 @@ if(g_WaitingForCycleCompletion && g_InsideBox<MarketRangeThreshold) {
     }
     
     // Nếu có lệnh breakout nhưng đã inside box → Tiếp tục DCA breakout
-    if(activeType == TRADE_BREAKOUT && g_InsideBox>MarketRangeThreshold) {
+    if(activeType == TRADE_BREAKOUT && g_InsideBox>g_CurrentAIThreshold) {
         ModifyOrdersTPEnhanced(currentPrice);
       if(g_TotalOrders_Buy > 0 && CheckAnyTPReached(currentPrice, POSITION_TYPE_BUY)) {
             ResetTrendModeTracking();
@@ -9995,7 +10075,8 @@ if(g_WaitingForCycleCompletion && g_InsideBox<MarketRangeThreshold) {
 UpdateDynamicSL();
 // Tiếp tục logic bình thường nếu không đang chờ completion
     if(!IsSpreadOK()) return;
-    
+    if(!IsAIConnectionOK()) return;  // Check AI connection if required
+
     static int tickCount = 0;
     tickCount++;
     if(tickCount >= 10) {
@@ -10033,6 +10114,15 @@ UpdateDynamicSL();
     
     DetectH1Box();
     g_InsideBox = CalculateMarketRange();
+    // DEBUG: Print the current market range (the value actually used) and whether it came from AI
+    {
+        double mr = g_InsideBox; // value returned by CalculateMarketRange()
+        string source = g_LastMarketRangeWasAI ? "AI" : "TRADITIONAL";
+        string mode = mr < g_CurrentAIThreshold ? "SIDEWAY (INSIDE BOX)" : "TREND (OUTSIDE BOX)";
+        // Print the used market range and its source (do NOT print the input threshold here)
+        string msg = StringFormat("OnTick: UsedMarketRange=%.0f Source=%s Mode=%s Symbol=%s Time=%s", mr, source, mode, _Symbol, TimeToString(TimeCurrent(), TIME_DATE|TIME_SECONDS));
+        Print(msg);
+    }
     
  
     // =============================================================================
@@ -10042,7 +10132,7 @@ RunFlexibleZoneStrategy();
 ModifyOrdersTPEnhanced(currentPrice);
   // A. INSIDE BOX → SIDEWAY TRADING
     double marketRange = CalculateMarketRange();
-    if(marketRange < MarketRangeThreshold) {
+    if(marketRange < g_CurrentAIThreshold) {
         // Narrow range checks (bổ sung cho sideway)
 HandleParallelDCA(currentPrice);
 
@@ -10078,11 +10168,11 @@ HandleParallelDCA(currentPrice);
          // A. INSIDE BOX → SIDEWAY TRADING
        // A. INSIDE BOX → SIDEWAY TRADING
     double marketRange = CalculateMarketRange();
-    if(marketRange >MarketRangeThreshold) {
+    if(marketRange >g_CurrentAIThreshold) {
 HandleSingleDirectionEntry();
         }
         
-      else  if(marketRange >MarketRangeThreshold*2){
+      else  if(marketRange >g_CurrentAIThreshold*2){
 HandleRegularDCA();   
   }
       
@@ -11541,7 +11631,7 @@ void ManagePriceZoneStrategy() {
     
     // Kiểm tra market range
     double marketRange = CalculateMarketRange();
-    if(marketRange < MarketRangeThreshold) {
+    if(marketRange < g_CurrentAIThreshold) {
         CancelAllZonePendingOrders();
         return;
     }

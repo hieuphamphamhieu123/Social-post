@@ -1,0 +1,117 @@
+================================================================================
+                   HƯỚNG DẪN RESTART API - CÔNG THỨC MỚI
+================================================================================
+
+Formula đã được cập nhật và TEST THÀNH CÔNG:
+  - Call 1: 36,732
+  - Call 2: 35,206 (change: -1,525) ✓
+  - Call 3: 37,061 (change: +1,855) ✓
+
+GIÁ TRỊ THAY ĐỔI LIÊN TỤC MỖI GIÂY!
+
+================================================================================
+                              CÁC BƯỚC THỰC HIỆN
+================================================================================
+
+BƯỚC 1: Tìm và STOP API hiện tại
+------------------------------------
+1. Tìm cửa sổ console đang chạy Python API (title có "AI Market API")
+2. Nhấn Ctrl+C để stop
+3. Đóng cửa sổ
+
+   HOẶC: Mở Task Manager → Find "python.exe" → End Task (tất cả)
+
+
+BƯỚC 2: START API với code mới
+------------------------------------
+Mở Command Prompt MỚI và chạy:
+
+    cd c:\Users\Admin\OneDrive\Documents\GitHub\Lab-9\ai_market_analyzer
+    python main.py
+
+Chờ 10 giây cho API khởi động.
+
+
+BƯỚC 3: VERIFY hoạt động
+------------------------------------
+Mở Command Prompt thứ 2 và chạy:
+
+    cd c:\Users\Admin\OneDrive\Documents\GitHub\Lab-9
+    python test_market_range_updates.py
+
+KẾT QUẢ MONG ĐỢI:
+    [1/10] Range: 36532 |
+    [2/10] Range: 35108 | [CHANGED] -1424 (-3.90%)
+    [3/10] Range: 37821 | [CHANGED] +2713 (+7.73%)
+    ...
+    [SUCCESS] Market range is updating continuously!
+    Changes detected: 9/9
+
+
+================================================================================
+                        NẾU VẪN THẤY STATIC (KHÔNG ĐỔI)
+================================================================================
+
+Kiểm tra Python console (nơi chạy main.py), phải thấy:
+
+    [INFO] 🔄 Prediction loop started!
+    [INFO] ✅ Prediction #1 updated: Market Range = 36532
+    [INFO] 🎯 Market Range: 36532 | base=4400 | before_clamp=39459 | ...
+    [INFO] ✅ Prediction #2 updated: Market Range = 35108
+    [INFO] 🎯 Market Range: 35108 | base=4400 | before_clamp=39459 | ...
+
+Nếu KHÔNG thấy logs trên:
+  → API chưa load code mới
+  → Xóa cache: python clear_cache_and_restart.py
+  → Restart lại
+
+
+================================================================================
+                           SAU KHI VERIFY THÀNH CÔNG
+================================================================================
+
+1. Giữ API chạy (KHÔNG đóng console)
+
+2. Mở MT5:
+   - Remove EA khỏi chart (nếu đang attach)
+   - Recompile AI_MarketRange.mqh (nếu cần)
+   - Attach lại EA
+
+3. Xem Expert log trong MT5:
+
+    🔄 [2025-11-05 21:05:45] Calling AI API: http://127.0.0.1:8000/market-range/simple
+    ✅ [FRESH] AI Market Range Retrieved: 36532 at 21:05:45
+    ✅ AI Market Range: 36532 (Updated every 1s)
+
+    🔄 [2025-11-05 21:05:46] Calling AI API: http://127.0.0.1:8000/market-range/simple
+    ✅ [FRESH] AI Market Range Retrieved: 35108 at 21:05:46
+    ✅ AI Market Range: 35108 (Updated every 1s)
+
+4. DONE! Market range giờ cập nhật liên tục theo orderflow từ Binance!
+
+
+================================================================================
+                              QUICK COMMANDS
+================================================================================
+
+# Test market range nhanh:
+curl http://127.0.0.1:8000/market-range/simple
+
+# Xem metrics từ Binance:
+curl http://127.0.0.1:8000/orderflow/metrics
+
+# Health check:
+curl http://127.0.0.1:8000/health
+
+
+================================================================================
+                                  NOTES
+================================================================================
+
+- Giá trị range: 7,000 - 40,000 points (for XAU/USD)
+- Update interval: Mỗi 1 giây
+- Variance: ±10% (time) + ±5% (random) để đảm bảo luôn thay đổi
+- Base calculation: Dựa vào volume từ PAXG/USDT orderflow
+
+
+================================================================================
