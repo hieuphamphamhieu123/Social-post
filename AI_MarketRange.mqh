@@ -30,6 +30,9 @@ string g_LastAPIError = "";
 // Record what value was actually used by CalculateMarketRangeWithAI()
 bool g_LastMarketRangeWasAI = false;
 double g_LastUsedMarketRange = 0;
+// Imbalance tracking
+double g_LastAIImbalance = 0;
+datetime g_LastImbalanceUpdate = 0;
 // Record what value was actually used by CalculateMarketRangeWithAI()
 double CalculateMarketRangeWithAI()
 {
@@ -203,12 +206,15 @@ bool InitAIIntegration()
 {
     // Note: WebRequest must be manually enabled in MT5 settings:
     // Tools -> Options -> Expert Advisors -> Allow WebRequest for listed URL
-    // Add: http://127.0.0.1:8000
+    // Add these URLs:
+    //   http://127.0.0.1:8000
+    //   http://localhost:8000
     // (Use IP address instead of 'localhost' for better MT5 compatibility)
 
     Print("========================================");
     Print("🤖 Initializing AI Integration...");
     Print("API URL: ", g_API_URL);
+    Print("Imbalance Endpoint: ", g_API_URL + "/orderflow/metrics");
     Print("Current Symbol: ", _Symbol);
     Print("========================================");
 
@@ -286,6 +292,140 @@ bool InitAIIntegration()
 double CalculateTraditionalMarketRange();
 
 // Hàm này sẽ THAY THẾ hàm CalculateMarketRange() gốc
+
+//+------------------------------------------------------------------+
+//| Parse imbalance từ JSON string                                    |
+//+------------------------------------------------------------------+
+double ParseImbalanceFromJSON(string json_string)
+{
+    Print("🔍 [DEBUG] Parsing Imbalance from JSON: ", json_string);
+
+    // Danh sách các key có thể có (ưu tiên volume_imbalance trước)
+    string keys[] = {"volume_imbalance", "order_book_imbalance", "imbalance", "order_imbalance", "order_flow_imbalance", "net_imbalance", "buy_sell_imbalance"};
+    int start = -1;
+    int keyLength = 0;
+
+    // Thử từng key
+    for(int i = 0; i < ArraySize(keys); i++)
+    {
+        string searchKey = "\"" + keys[i] + "\":";
+        start = StringFind(json_string, searchKey);
+
+        if(start >= 0)
+        {
+            keyLength = StringLen(searchKey);
+            Print("🔍 [DEBUG] Found key: ", keys[i]);
+            break;
+        }
+    }
+
+    // Nếu không tìm thấy key nào
+    if(start < 0)
+    {
+        Print("❌ [DEBUG] No imbalance key found in JSON");
+        return 0;
+    }
+
+    start += keyLength;
+
+    // Skip whitespace
+    while(start < StringLen(json_string) &&
+          (StringGetCharacter(json_string, start) == ' ' ||
+           StringGetCharacter(json_string, start) == '\t'))
+    {
+        start++;
+    }
+
+    int end = start;
+    while(end < StringLen(json_string))
+    {
+        ushort c = StringGetCharacter(json_string, end);
+        // Allow minus sign and decimal point
+        if(c == ',' || c == '}' || c == ' ' || c == '\n' || c == '\r' || c == '\t')
+            break;
+        end++;
+    }
+
+    string value_str = StringSubstr(json_string, start, end - start);
+
+    // Remove any quotes if value is string
+    StringReplace(value_str, "\"", "");
+    StringTrimLeft(value_str);
+    StringTrimRight(value_str);
+
+    double result = StringToDouble(value_str);
+
+    Print("🔍 [DEBUG] Parsed value_str: '", value_str, "' → double: ", result);
+
+    return result;
+}
+
+//+------------------------------------------------------------------+
+//| Lấy AI Imbalance từ API                                           |
+//+------------------------------------------------------------------+
+double GetAIImbalance()
+{
+    // Cache trong 1 giây để tránh gọi API quá nhiều
+    static datetime lastSecond = 0;
+    static double lastValueInSecond = 0;
+
+    datetime currentSecond = TimeCurrent();
+
+    // Nếu gọi nhiều lần trong cùng 1 giây, trả về giá trị đã cache
+    if(currentSecond == lastSecond && lastValueInSecond != 0)
+    {
+        return lastValueInSecond;
+    }
+
+    // FIX: Dùng endpoint đúng cho orderflow metrics
+    string url = g_API_URL + "/orderflow/metrics";
+    string headers = "Content-Type: application/json\r\n";
+    char post[], result[];
+    string result_headers;
+
+    Print("🔄 [", TimeToString(TimeCurrent(), TIME_DATE|TIME_SECONDS), "] Getting AI Imbalance from: ", url);
+
+    int res = WebRequest(
+        "GET",
+        url,
+        headers,
+        g_API_TIMEOUT,
+        post,
+        result,
+        result_headers
+    );
+
+    if(res == 200)
+    {
+        string json_string = CharArrayToString(result);
+        Print("📦 JSON Response for Imbalance: ", json_string);
+
+        double imbalance = ParseImbalanceFromJSON(json_string);
+
+        g_LastAIImbalance = imbalance;
+        g_LastImbalanceUpdate = TimeCurrent();
+        g_APIAvailable = true;
+        lastSecond = currentSecond;
+        lastValueInSecond = imbalance;
+
+        Print("✅ AI Imbalance Retrieved: ", imbalance, " at ", TimeToString(TimeCurrent(), TIME_SECONDS));
+        return imbalance;
+    }
+    else
+    {
+        g_APIAvailable = false;
+        Print("❌ API Call Failed for Imbalance - Code: ", res);
+
+        // Sử dụng giá trị cũ nếu có
+        if(g_LastImbalanceUpdate > 0 && TimeCurrent() - g_LastImbalanceUpdate < 300) // 5 phút
+        {
+            Print("⚠️ API failed, using last known imbalance: ", g_LastAIImbalance);
+            return g_LastAIImbalance;
+        }
+    }
+
+    return 0; // Không có dữ liệu
+}
 
 
 //+------------------------------------------------------------------+
