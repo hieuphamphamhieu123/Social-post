@@ -1113,9 +1113,12 @@ void ModifyOrdersTPEnhanced(double currentPrice) {
                 if(!PositionSelectByTicket(ticket)) continue;
                 if(PositionGetString(POSITION_SYMBOL) != _Symbol) continue;
                 if(PositionGetInteger(POSITION_TYPE) != POSITION_TYPE_BUY) continue;
-                
-                // C?p nh?t TP
-                trade.PositionModify(ticket, 0, newBuyTP);
+
+                // C?p nh?t TP ch? khi giá tr? khác
+                double currentTP = PositionGetDouble(POSITION_TP);
+                if(MathAbs(currentTP - newBuyTP) > _Point) {
+                    trade.PositionModify(ticket, 0, newBuyTP);
+                }
             }
         }
     }
@@ -1135,9 +1138,12 @@ void ModifyOrdersTPEnhanced(double currentPrice) {
                 if(!PositionSelectByTicket(ticket)) continue;
                 if(PositionGetString(POSITION_SYMBOL) != _Symbol) continue;
                 if(PositionGetInteger(POSITION_TYPE) != POSITION_TYPE_SELL) continue;
-                
-                // C?p nh?t TP
-                trade.PositionModify(ticket, 0, newSellTP);
+
+                // C?p nh?t TP ch? khi giá tr? khác
+                double currentTP = PositionGetDouble(POSITION_TP);
+                if(MathAbs(currentTP - newSellTP) > _Point) {
+                    trade.PositionModify(ticket, 0, newSellTP);
+                }
             }
         }
     }
@@ -2345,6 +2351,7 @@ void UpdateAIThreshold() {
             g_CurrentAIThreshold = MarketRangeThreshold;
         }
 
+        Print("⚠️ AI Threshold not updated, using: ", g_CurrentAIThreshold);
     }
 }
 
@@ -2977,10 +2984,14 @@ void UpdateGroupTP(ENUM_POSITION_TYPE posType, bool isHedge, double newTP) {
         
         string comment = PositionGetString(POSITION_COMMENT);
         bool orderIsHedge = (StringFind(comment, "Hedge") >= 0);
-        
+
         if(orderIsHedge == isHedge) {
             if(IsValidTPLevel(SymbolInfoDouble(_Symbol, SYMBOL_BID), newTP, posType)) {
-                trade.PositionModify(ticket, 0, newTP);
+                // Ch? c?p nh?t n?u TP khác giá tr? hi?n t?i
+                double currentTP = PositionGetDouble(POSITION_TP);
+                if(MathAbs(currentTP - newTP) > _Point) {
+                    trade.PositionModify(ticket, 0, newTP);
+                }
             }
         }
     }
@@ -4563,6 +4574,8 @@ bool IsAIConnectionOK() {
       static datetime lastWarning = 0;
       // Log warning m?i 5 phút
       if(TimeCurrent() - lastWarning > 300) {
+         Print("⛔ TRADING DISABLED: AI connection required but API is offline!");
+         Print("   Set RequireAIConnection = false to allow trading without AI");
          lastWarning = TimeCurrent();
       }
       return false;
@@ -5644,24 +5657,16 @@ bool OpenOrder(ENUM_ORDER_TYPE orderType, double lotSize, double currentPrice, s
 //| - Imbalance = 0: Không mở lệnh                                    |
 //+------------------------------------------------------------------+
 bool OpenOrderByAIImbalance(double lotSize = 0, string customComment = "") {
-    // Kiểm tra có thể mở chu kỳ mới không (chặn nếu chu kỳ cũ chưa hoàn thành)
-    // AI Imbalance orders được coi như TRADE_REGULAR
-    if(!CanOpenNewCycle(TRADE_REGULAR)) {
-        // Nếu đang có lệnh Regular, cho phép DCA trong cùng chu kỳ
-        if(GetActiveTradeType() == TRADE_REGULAR) {
-            ManageUnifiedDCA();
-        }
-        return false;
-    }
-
     // SCALPING: Kiểm tra cooldown để tránh mở nhiều lệnh liên tục
     datetime currentTime = TimeCurrent();
     if(currentTime - g_LastAIOrderTime < AI_ORDER_COOLDOWN) {
+        Print("⏳ AI Order Cooldown - Chờ ", AI_ORDER_COOLDOWN - (currentTime - g_LastAIOrderTime), " giây nữa");
         return false;
     }
 
     // Kiểm tra kết nối AI
     if(!g_APIAvailable) {
+        Print("⚠️ AI API không khả dụng - Không thể mở lệnh theo imbalance");
         return false;
     }
 
@@ -5669,9 +5674,11 @@ bool OpenOrderByAIImbalance(double lotSize = 0, string customComment = "") {
     double imbalance = GetAIImbalance();
 
     // Log imbalance value
+    Print("📊 AI Imbalance: ", imbalance);
 
     // SCALPING: Kiểm tra ngưỡng tối thiểu cho scalping
     if(MathAbs(imbalance) < AI_MIN_IMBALANCE_THRESHOLD) {
+        Print("⚠️ Imbalance yếu (", imbalance, ") < ngưỡng tối thiểu (", AI_MIN_IMBALANCE_THRESHOLD, ") - Không phù hợp scalping");
         return false;
     }
 
@@ -5690,14 +5697,17 @@ bool OpenOrderByAIImbalance(double lotSize = 0, string customComment = "") {
         direction = "SELL";
     } else {
         // Imbalance = 0 → Không có tín hiệu
+        Print("⚠️ Imbalance = 0 - Không có tín hiệu giao dịch");
         return false;
     }
 
     // SCALPING: Kiểm tra xung đột - tránh mở nhiều lệnh cùng chiều
     if(orderType == ORDER_TYPE_BUY && g_TotalOrders_Buy > 0) {
+        Print("⚠️ Đã có ", g_TotalOrders_Buy, " lệnh BUY - Không mở thêm AI imbalance BUY (tránh xung đột)");
         return false;
     }
     if(orderType == ORDER_TYPE_SELL && g_TotalOrders_Sell > 0) {
+        Print("⚠️ Đã có ", g_TotalOrders_Sell, " lệnh SELL - Không mở thêm AI imbalance SELL (tránh xung đột)");
         return false;
     }
 
@@ -5715,14 +5725,21 @@ bool OpenOrderByAIImbalance(double lotSize = 0, string customComment = "") {
         comment = StringFormat("AI-%s (Imb:%.2f)", direction, imbalance);
     }
 
-  
+    // Log thông tin
+    Print("🤖 AI Imbalance Signal:");
+    Print("   Direction: ", direction, " (Imbalance: ", imbalance, ")");
+    Print("   Price: ", currentPrice);
+    Print("   Lot Size: ", finalLotSize);
+    Print("   Comment: ", comment);
 
     // Kiểm tra điều kiện cơ bản
     if(!EnforcePeriodOrderLimits()) {
+        Print("⚠️ Vượt quá giới hạn lệnh trong giai đoạn");
         return false;
     }
 
     if(!CanOpenMoreOrdersInPeriod()) {
+        Print("⚠️ Không thể mở thêm lệnh trong giai đoạn này");
         return false;
     }
 
@@ -5749,6 +5766,7 @@ bool OpenOrderByAIImbalance(double lotSize = 0, string customComment = "") {
 
     // Kiểm tra TP hợp lệ
     if(!IsValidTPLevel(currentPrice, takeProfit, posType)) {
+        Print("⚠️ TP không hợp lệ");
         return false;
     }
 
@@ -5756,8 +5774,11 @@ bool OpenOrderByAIImbalance(double lotSize = 0, string customComment = "") {
     bool result = trade.PositionOpen(_Symbol, orderType, finalLotSize, currentPrice, stopLoss, takeProfit, comment);
 
     if(result) {
-     
-        if(stopLoss > 0) ;
+        Print("✅ Đã mở lệnh ", direction, " theo AI Imbalance thành công!");
+        Print("   Ticket: ", trade.ResultOrder());
+        Print("   Price: ", currentPrice);
+        Print("   TP: ", takeProfit);
+        if(stopLoss > 0) Print("   SL: ", stopLoss);
 
         // SCALPING: Cập nhật thời gian mở lệnh AI để kích hoạt cooldown
         g_LastAIOrderTime = TimeCurrent();
@@ -5770,7 +5791,11 @@ bool OpenOrderByAIImbalance(double lotSize = 0, string customComment = "") {
         if(newOrderCount >= CombinedTPLevel) {
             UpdateCombinedTP(posType, false);
         }
-    } 
+    } else {
+        Print("❌ Không thể mở lệnh ", direction, " theo AI Imbalance");
+        Print("   Error Code: ", GetLastError());
+    }
+
     return result;
 }
 
@@ -6435,11 +6460,15 @@ void ModifyOrdersTP(double currentPrice, ENUM_POSITION_TYPE posType) {
                     if(!PositionSelectByTicket(ticket)) continue;
                     if(PositionGetString(POSITION_SYMBOL) != _Symbol) continue;
                     if(PositionGetInteger(POSITION_TYPE) != posType) continue;
-                    
+
                     string comment = PositionGetString(POSITION_COMMENT);
                     if(StringFind(comment, "Hedge") >= 0) continue;
-                    
-                    trade.PositionModify(ticket, 0, newTP);
+
+                    // Ch? c?p nh?t n?u TP khác giá tr? hi?n t?i
+                    double currentTP = PositionGetDouble(POSITION_TP);
+                    if(MathAbs(currentTP - newTP) > _Point) {
+                        trade.PositionModify(ticket, 0, newTP);
+                    }
                 }
                 g_LastOrderModification = TimeCurrent();
                 lastUpdate = TimeCurrent();
@@ -6824,10 +6853,14 @@ void OpenDCAOrderWithHedge(ENUM_ORDER_TYPE orderType, double lotSize, double cur
         if(trade.PositionOpen(_Symbol, orderType, lotSize, currentPrice, 0, takeProfit, comment)) {
             for(int i = PositionsTotal() - 1; i >= 0; i--) {
                 ulong ticket = PositionGetTicket(i);
-                if(PositionSelectByTicket(ticket) && 
+                if(PositionSelectByTicket(ticket) &&
                    PositionGetString(POSITION_SYMBOL) == _Symbol &&
                    PositionGetInteger(POSITION_TYPE) == posType) {
-                    trade.PositionModify(ticket, 0, takeProfit);
+                    // Ch? c?p nh?t n?u TP khác giá tr? hi?n t?i
+                    double currentTP = PositionGetDouble(POSITION_TP);
+                    if(MathAbs(currentTP - takeProfit) > _Point) {
+                        trade.PositionModify(ticket, 0, takeProfit);
+                    }
                 }
             }
         }
@@ -7880,160 +7913,45 @@ input bool CloseRecoveryWhenVolatilityDecreases = true; // ?óng recovery khi th
 
 // Thêm globals
 enum ActiveTradeType {
-    TRADE_NONE,          // Không có lệnh nào
-    TRADE_ZONE,          // Lệnh Zone (sideway trong zone)
-    TRADE_BREAKOUT,      // Lệnh Breakout/Trend
-    TRADE_RECOVERY,      // Lệnh Recovery
-    TRADE_REGULAR,       // Lệnh Regular DCA
-    TRADE_SIDEWAY        // Lệnh Sideway (Box Buy/Sell)
+    TRADE_NONE,
+    TRADE_SIDEWAY,
+    TRADE_BREAKOUT
 };
 
 ActiveTradeType g_ActiveTradeType = TRADE_NONE;
 bool g_WaitingForCycleCompletion = false;
-int g_CurrentCycleOrderCount_Buy = 0;   // Số lệnh trong chu kỳ hiện tại (Buy)
-int g_CurrentCycleOrderCount_Sell = 0;  // Số lệnh trong chu kỳ hiện tại (Sell)
 
-// Hàm kiểm tra loại lệnh đang active - CẢI TIẾN
+// Hàm kiểm tra loại lệnh đang active
 ActiveTradeType GetActiveTradeType() {
     if(PositionsTotal() == 0) return TRADE_NONE;
-
-    // Priority order: Recovery > Zone > Regular > Breakout > Sideway
-    bool hasRecoveryOrders = false;
-    bool hasZoneOrders = false;
-    bool hasRegularOrders = false;
-    bool hasBreakoutOrders = false;
+    
     bool hasSidewayOrders = false;
-
+    bool hasBreakoutOrders = false;
+    
     for(int i = PositionsTotal() - 1; i >= 0; i--) {
         ulong ticket = PositionGetTicket(i);
         if(!PositionSelectByTicket(ticket)) continue;
         if(PositionGetString(POSITION_SYMBOL) != _Symbol) continue;
-
+        
         string comment = PositionGetString(POSITION_COMMENT);
-
-        // Recovery orders (highest priority)
-        if(StringFind(comment, "Recovery") >= 0) {
-            hasRecoveryOrders = true;
-        }
-        // Zone orders
-        else if(StringFind(comment, "Zone") >= 0) {
-            hasZoneOrders = true;
-        }
-        // Regular orders
-        else if(StringFind(comment, "Regular") >= 0) {
-            hasRegularOrders = true;
-        }
-        // Breakout/Single direction/Trend orders
-        else if(StringFind(comment, "Single") >= 0 ||
-                StringFind(comment, "Breakout") >= 0 ||
-                StringFind(comment, "Trend") >= 0) {
-            hasBreakoutOrders = true;
-        }
-        // Sideway orders (Box Buy/Sell)
-        else if(StringFind(comment, "Box Buy") >= 0 ||
-                StringFind(comment, "Box Sell") >= 0 ||
-                StringFind(comment, "Sideway") >= 0) {
+        
+        // Sideway orders
+        if(StringFind(comment, "Box Buy") >= 0 || StringFind(comment, "Box Sell") >= 0 ||
+           StringFind(comment, "Sideway") >= 0) {
             hasSidewayOrders = true;
         }
+        
+        // Breakout/Single direction orders
+        if(StringFind(comment, "Single") >= 0 || StringFind(comment, "Breakout") >= 0 ||
+           StringFind(comment, "Trend") >= 0) {
+            hasBreakoutOrders = true;
+        }
     }
-
-    // Return theo priority
-    if(hasRecoveryOrders) return TRADE_RECOVERY;
-    if(hasZoneOrders) return TRADE_ZONE;
-    if(hasRegularOrders) return TRADE_REGULAR;
-    if(hasBreakoutOrders) return TRADE_BREAKOUT;
+    
     if(hasSidewayOrders) return TRADE_SIDEWAY;
-
+    if(hasBreakoutOrders) return TRADE_BREAKOUT;
+    
     return TRADE_NONE;
-}
-
-// ============================================================================
-// HÀM QUẢN LÝ DCA THỐNG NHẤT - ĐẢM BẢO MỖI CHU KỲ CHỈ DCA ĐÚNG LOẠI
-// ============================================================================
-void ManageUnifiedDCA() {
-    double currentPrice = GetCleanPrice();
-
-    // Xác định loại chu kỳ đang active
-    ActiveTradeType activeType = GetActiveTradeType();
-    g_ActiveTradeType = activeType;
-
-    // Nếu không có lệnh nào, không làm gì
-    if(activeType == TRADE_NONE) {
-        g_WaitingForCycleCompletion = false;
-        g_CurrentCycleOrderCount_Buy = 0;
-        g_CurrentCycleOrderCount_Sell = 0;
-        return;
-    }
-
-    // ĐẢM BẢO CHỈ DCA ĐÚNG LOẠI CHU KỲ ĐANG ACTIVE
-    switch(activeType) {
-        case TRADE_RECOVERY:
-            // Chỉ xử lý Recovery DCA
-            ManageRecoveryDCA();
-            break;
-
-        case TRADE_ZONE:
-            // Chỉ xử lý Zone DCA
-            if(EnableZoneDCA) {
-                HandleZoneBuyDCA(currentPrice);
-                HandleZoneSellDCA(currentPrice);
-            }
-            break;
-
-        case TRADE_REGULAR:
-            // Chỉ xử lý Regular DCA
-            HandleRegularDCA();
-            break;
-
-        case TRADE_BREAKOUT:
-            // Xử lý DCA cho Breakout/Trend orders
-            // Sử dụng HandleSingleDirectionEntry hoặc logic tương tự
-            if(g_DailyAllowedDirection != DAILY_BOTH) {
-                HandleSingleDirectionEntry();
-            }
-            break;
-
-        case TRADE_SIDEWAY:
-            // Xử lý DCA cho Sideway orders (Box Buy/Sell)
-            HandleParallelDCA(currentPrice);
-            break;
-
-        default:
-            break;
-    }
-}
-
-// ============================================================================
-// HÀM KIỂM TRA CÓ THỂ MỞ CHU KỲ MỚI KHÔNG
-// ============================================================================
-bool CanOpenNewCycle(ActiveTradeType newCycleType) {
-    // Nếu đang chờ hoàn thành chu kỳ cũ, không cho mở chu kỳ mới
-    if(g_WaitingForCycleCompletion) {
-        return false;
-    }
-
-    // Nếu không có lệnh nào, cho phép mở chu kỳ mới
-    if(PositionsTotal() == 0) {
-        return true;
-    }
-
-    // Kiểm tra loại chu kỳ đang active
-    ActiveTradeType currentType = GetActiveTradeType();
-
-    // Nếu đang có lệnh của loại khác, KHÔNG cho mở chu kỳ mới
-    if(currentType != TRADE_NONE && currentType != newCycleType) {
-        g_WaitingForCycleCompletion = true;
-        return false;
-    }
-
-    // Nếu cùng loại chu kỳ, kiểm tra điều kiện cụ thể
-    // (Ví dụ: Zone có thể có nhiều lệnh song song)
-    if(currentType == newCycleType) {
-        // Cho phép nếu cùng loại (DCA sẽ được xử lý trong ManageUnifiedDCA)
-        return true;
-    }
-
-    return true;
 }
 
 void HandleCycleCompletion() {
@@ -8145,8 +8063,6 @@ void HandleCycleCompletion() {
             if(PositionsTotal() == 0) {
                 g_ActiveTradeType = TRADE_NONE;
                 g_WaitingForCycleCompletion = false;
-                g_CurrentCycleOrderCount_Buy = 0;
-                g_CurrentCycleOrderCount_Sell = 0;
                 canOpenNewTrade_Buy = true;
                 canOpenNewTrade_Sell = true;
             }
@@ -8784,16 +8700,17 @@ double GetVolumeMultiplierAtPrice(double price) {
     return 1.0; // Normal volume
 }
 
-
 void HandleParallelDCA(double currentPrice) {
     // Ki?m tra gi?i h?n chu k?
     if(!EnforcePeriodOrderLimits()) {
+        Print("Gi?i h?n l?nh chu k? ?ã ??t - không th? m? l?nh m?i");
         return;
     }
      if(EnablePriceZoneStrategy && HasAnyZoneOrders()) {
         // Skip hedging if zone orders exist
         static datetime lastHedgeSkipLog = 0;
         if(TimeCurrent() - lastHedgeSkipLog > 300) {
+            Print("Skipping hedge check: Zone strategy active with existing orders");
             lastHedgeSkipLog = TimeCurrent();
         }
     }
@@ -8875,6 +8792,7 @@ void HandleParallelDCA(double currentPrice) {
                     double orderDistance = MathAbs(currentPrice - orderPrice) / _Point;
                     
                     if(orderDistance < MinimumOrderDistance) {
+                        Print("Kho?ng cách quá g?n v?i l?nh t?i giá ", orderPrice);
                         allDistancesOK = false;
                         break;
                     }
@@ -8926,6 +8844,7 @@ void HandleParallelDCA(double currentPrice) {
                     double orderDistance = MathAbs(currentPrice - orderPrice) / _Point;
                     
                     if(orderDistance < MinimumOrderDistance) {
+                        Print("Kho?ng cách quá g?n v?i l?nh t?i giá ", orderPrice);
                         allDistancesOK = false;
                         break;
                     }
@@ -8957,9 +8876,6 @@ void HandleParallelDCA(double currentPrice) {
     
     // X? lý DCA cho l?nh Buy th??ng
     if(buyGroup.hasRegularOrders && g_TotalOrders_Buy < MaxOrders) {
-        if(g_DailyAllowedDirection == DAILY_BUY_ONLY && g_TotalOrders_Sell > 0) {
-        return;
-    }
         double regularDistance = MathAbs(currentPrice - buyGroup.lastRegularPrice) / _Point;
         double requiredDistance = GetExactDCADistance(buyGroup.regularCount + 1);
         
@@ -8979,9 +8895,6 @@ void HandleParallelDCA(double currentPrice) {
     
     // X? lý DCA cho l?nh Sell th??ng
     if(sellGroup.hasRegularOrders && g_TotalOrders_Sell < MaxOrders) {
-         if(g_DailyAllowedDirection == DAILY_SELL_ONLY && g_TotalOrders_Buy > 0) {
-        return;
-    }
         double regularDistance = MathAbs(currentPrice - sellGroup.lastRegularPrice) / _Point;
         double requiredDistance = GetExactDCADistance(sellGroup.regularCount + 1);
         
@@ -10372,54 +10285,52 @@ UpdateDynamicSL();
     DetectH1Box();
     g_InsideBox = CalculateMarketRange();
     // DEBUG: Print the current market range (the value actually used) and whether it came from AI
-  
+    {
+        double mr = g_InsideBox; // value returned by CalculateMarketRange()
+        string source = g_LastMarketRangeWasAI ? "AI" : "TRADITIONAL";
+        string mode = mr < g_CurrentAIThreshold ? "SIDEWAY (INSIDE BOX)" : "TREND (OUTSIDE BOX)";
+        // Print the used market range and its source (do NOT print the input threshold here)
+        string msg = StringFormat("OnTick: UsedMarketRange=%.0f Source=%s Mode=%s Symbol=%s Time=%s", mr, source, mode, _Symbol, TimeToString(TimeCurrent(), TIME_DATE|TIME_SECONDS));
+        Print(msg);
+    }
+    
  
     // =============================================================================
     // 4. TRADING LOGIC DỰA TRÊN BOX
     // =============================================================================
 
-    // SCALPING PRIORITY 1: AI Imbalance (Cao nhất - mở lệnh khi có tín hiệu AI mạnh)
-    // Chỉ thử mở nếu không có lệnh trong hướng đó (tránh xung đột)
-bool skipNextLogic = false;
-
-if (g_TotalOrders_Buy == 0 || g_TotalOrders_Sell == 0)
+// SCALPING PRIORITY 1: AI Imbalance (Cao nhất - mở lệnh khi có tín hiệu AI mạnh)
+// Chỉ thử mở nếu không có lệnh trong hướng đó (tránh xung đột)
+// SCALPING PRIORITY 1: AI Imbalance (Cao nhất - mở lệnh khi có tín hiệu AI mạnh)
+// Chỉ thử mở nếu không có lệnh trong hướng đó (tránh xung đột)
+if (g_TotalOrders_Buy == 0 && g_TotalOrders_Sell == 0)
 {
+    // Thử mở lệnh bằng chiến thuật AI Imbalance
     if (OpenOrderByAIImbalance())
     {
-        skipNextLogic = true;  // ✅ Đánh dấu là AI đã mở lệnh
+        // ✅ AI Imbalance mở lệnh thành công
     }
-    else
+    else 
     {
-    HandleSingleDirectionEntry();
-    if(g_TotalOrders_Buy > 0 || g_TotalOrders_Sell > 0) {
-      RunFlexibleZoneStrategy();
-      return;
-    }
-    
+        // ❌ Chiến thuật AI không mở được lệnh -> thử chiến thuật 2
+        RunFlexibleZoneStrategy();
+        
+        // Kiểm tra xem có lệnh mới được mở không
+        if (g_TotalOrders_Buy == 0 || g_TotalOrders_Sell == 0)
+        {
+HandleSingleDirectionEntry();
+        }
     }
 }
 
-// Nếu AI đã mở lệnh thì bỏ qua phần logic sau
-if (!skipNextLogic)
-{
-
-// SCALPING PRIORITY 3: Single Direction Entry
+HandleParallelDCA(currentPrice);  
 ModifyOrdersTPEnhanced(currentPrice);
   // A. INSIDE BOX → SIDEWAY TRADING
     double marketRange = CalculateMarketRange();
-   if(marketRange < g_CurrentAIThreshold) {
+   if(marketRange < g_CurrentAIThreshold && g_TotalOrders_Buy == 0 && g_TotalOrders_Sell == 0) {
     // Narrow range checks (bổ sung cho sideway)
-    
-    // SCALPING PRIORITY 4: Unified DCA Management (thấp nhất - chỉ khi đã có orders)
-    // Sử dụng ManageUnifiedDCA() để đảm bảo DCA đúng loại chu kỳ
-    if(g_TotalOrders_Buy > 0 || g_TotalOrders_Sell > 0) {
-      
-        ManageUnifiedDCA();
-     
-    }
-           HandleRegularDCA();
-HandleParallelDCA(currentPrice);
-    // Order flow filter
+  HandleRegularDCA();
+            CleanupPendingZoneOrders();
     OrderFlowStrength flowStrength = AnalyzeOrderFlowAdvanced();
     if(flowStrength == FLOW_STRONG_SELL && g_TotalOrders_Buy > 0) return;
     
@@ -10452,13 +10363,14 @@ HandleParallelDCA(currentPrice);
        // A. INSIDE BOX → SIDEWAY TRADING
     double marketRange = CalculateMarketRange();
     if(marketRange >g_CurrentAIThreshold) {
+    OpenOrderByAIImbalance();
+     HandleZoneBuyDCA(currentPrice);
+     HandleZoneSellDCA(currentPrice);
         // SCALPING PRIORITY 2: Flexible Zone Strategy (cho trend/breakout)
-       
-        }
-      
+       }
         
  
-  }    
+      
       
       
       
@@ -11658,10 +11570,8 @@ input bool EnableSimultaneousZoneOrders = true; // Allow placing both buy and se
 
 // Add these global variables
 datetime g_LastZoneOrderPlacement = 0;          // Track when zone orders were last placed
-const int ZONE_ORDER_PLACEMENT_COOLDOWN = 60;   // SCALPING: Cooldown giảm xuống 60 giây
+const int ZONE_ORDER_PLACEMENT_COOLDOWN = 300;  // Cooldown between placements (5 minutes)
 int g_CurrentZoneOrderCount = 0;                // Track number of active zone order pairs
-const int MAX_ZONE_ORDERS_PER_DIRECTION = 1;    // SCALPING: Tối đa 1 lệnh zone mỗi chiều
-const double MIN_ZONE_ORDER_DISTANCE = 200;     // SCALPING: Khoảng cách tối thiểu giữa các zone orders (200 points)
 // Sửa hàm PlacePendingOrdersAtZones để áp dụng logic tâm giá
 void PlacePendingOrdersAtZones() {
     if(!IsSpreadOK() || !CanOpenMoreOrdersInPeriod()) return;
@@ -11730,28 +11640,18 @@ void PlacePendingOrdersAtZones() {
         shouldPlaceSell = true;
     }
     
-    // SCALPING: Đếm số lượng zone orders trước khi đặt
-    int buyZoneCount = CountZoneOrders(ORDER_TYPE_BUY_STOP);
-    int sellZoneCount = CountZoneOrders(ORDER_TYPE_SELL_STOP);
-
     // Đặt lệnh zone với khoảng cách từ tâm giá
-    if(shouldPlaceBuy && buyZoneCount < MAX_ZONE_ORDERS_PER_DIRECTION) {
+    if(shouldPlaceBuy) {
         double buyStopPrice = NormalizeDouble(centerPrice + ZoneStopDistance * _Point, _Digits);
-        if(!IsZoneOrderTooClose(ORDER_TYPE_BUY_STOP, buyStopPrice)) {
-            if(PlaceZoneStopOrder(ORDER_TYPE_BUY_STOP, buyStopPrice, "Zone Buy")) {
-                g_LastZoneOrderPlacement = currentTime;
-            }
-        }
+        PlaceZoneStopOrder(ORDER_TYPE_BUY_STOP, buyStopPrice, "Zone Buy");
     }
-
-    if(shouldPlaceSell && sellZoneCount < MAX_ZONE_ORDERS_PER_DIRECTION) {
+    
+    if(shouldPlaceSell) {
         double sellStopPrice = NormalizeDouble(centerPrice - ZoneStopDistance * _Point, _Digits);
-        if(!IsZoneOrderTooClose(ORDER_TYPE_SELL_STOP, sellStopPrice)) {
-            if(PlaceZoneStopOrder(ORDER_TYPE_SELL_STOP, sellStopPrice, "Zone Sell")) {
-                g_LastZoneOrderPlacement = currentTime;
-            }
-        }
+        PlaceZoneStopOrder(ORDER_TYPE_SELL_STOP, sellStopPrice, "Zone Sell");
     }
+    
+    g_LastZoneOrderPlacement = currentTime;
 }
 
 
@@ -11806,69 +11706,60 @@ bool HasActiveZonePositions(ENUM_POSITION_TYPE posType) {
 
 void PlaceZoneOrdersIfNeeded(double currentPrice, double centerPrice) {
     datetime currentTime = TimeCurrent();
-
-    // SCALPING: Cooldown check (60 giây)
+    
+    // SỬA: Tăng cooldown để tránh đặt lệnh liên tục
     if(currentTime - g_LastZoneOrderPlacement < ZONE_ORDER_PLACEMENT_COOLDOWN) {
         return;
     }
-
+    
     // Kiểm tra hướng chuyển động giá
     bool priceMovingUp = IsPriceMovingUp();
     bool priceMovingDown = IsPriceMovingDown();
-
-    // SCALPING: Đếm số lượng zone orders hiện tại
-    int buyZoneCount = CountZoneOrders(ORDER_TYPE_BUY_STOP);
-    int sellZoneCount = CountZoneOrders(ORDER_TYPE_SELL_STOP);
-
+    
+    // Kiểm tra pending orders đã có chưa
+    bool hasBuyZonePending = HasZonePendingOrders(ORDER_TYPE_BUY_STOP);
+    bool hasSellZonePending = HasZonePendingOrders(ORDER_TYPE_SELL_STOP);
+    
     // Kiểm tra position active
     bool hasActiveBuyZone = HasActiveZonePositions(POSITION_TYPE_BUY);
     bool hasActiveSellZone = HasActiveZonePositions(POSITION_TYPE_SELL);
-
+    
     // Logic đặt lệnh - CHỈ đặt khi thực sự cần
     bool shouldPlaceBuy = false;
     bool shouldPlaceSell = false;
-
+    
     if(EnableSimultaneousZoneOrders) {
-        // SCALPING: Chỉ cho phép tối đa 1 lệnh zone mỗi chiều
-        if(buyZoneCount < MAX_ZONE_ORDERS_PER_DIRECTION && !hasActiveBuyZone && EnableBuyOrders) {
+        // Cho phép đặt cả 2 loại nếu enabled
+        if(!hasBuyZonePending && !hasActiveBuyZone && EnableBuyOrders) {
             shouldPlaceBuy = true;
         }
-        if(sellZoneCount < MAX_ZONE_ORDERS_PER_DIRECTION && !hasActiveSellZone && EnableSellOrders) {
+        if(!hasSellZonePending && !hasActiveSellZone && EnableSellOrders) {
             shouldPlaceSell = true;
         }
     } else {
-        // SCALPING: Đặt lệnh BUY nếu: giá đi lên và chưa đủ số lượng
-        if(priceMovingUp && buyZoneCount < MAX_ZONE_ORDERS_PER_DIRECTION && !hasActiveBuyZone && EnableBuyOrders) {
+        // Đặt lệnh BUY nếu: giá đi lên và chưa có lệnh/position buy zone
+        if(priceMovingUp && !hasBuyZonePending && !hasActiveBuyZone && EnableBuyOrders) {
             shouldPlaceBuy = true;
         }
-
-        // SCALPING: Đặt lệnh SELL nếu: giá đi xuống và chưa đủ số lượng
-        if(priceMovingDown && sellZoneCount < MAX_ZONE_ORDERS_PER_DIRECTION && !hasActiveSellZone && EnableSellOrders) {
+        
+        // Đặt lệnh SELL nếu: giá đi xuống và chưa có lệnh/position sell zone  
+        if(priceMovingDown && !hasSellZonePending && !hasActiveSellZone && EnableSellOrders) {
             shouldPlaceSell = true;
         }
     }
-
-    // SCALPING: Đặt lệnh zone với kiểm tra khoảng cách
+    
+    // SỬA: Đặt lệnh zone dựa trên giá hiện tại với khoảng cách cố định
     if(shouldPlaceBuy) {
         double buyZonePrice = NormalizeDouble(currentPrice + ZoneStopDistance * _Point, _Digits);
-
-        // SCALPING: Kiểm tra khoảng cách với zone orders hiện có
-        if(!IsZoneOrderTooClose(ORDER_TYPE_BUY_STOP, buyZonePrice)) {
-            if(PlaceZoneStopOrder(ORDER_TYPE_BUY_STOP, buyZonePrice, "Zone Buy Initial")) {
-                g_LastZoneOrderPlacement = currentTime;
-
-            }
+        if(PlaceZoneStopOrder(ORDER_TYPE_BUY_STOP, buyZonePrice, "Zone Buy")) {
+            g_LastZoneOrderPlacement = currentTime; // CHỈ update nếu đặt lệnh thành công
         }
     }
-
+    
     if(shouldPlaceSell) {
         double sellZonePrice = NormalizeDouble(currentPrice - ZoneStopDistance * _Point, _Digits);
-
-        // SCALPING: Kiểm tra khoảng cách với zone orders hiện có
-        if(!IsZoneOrderTooClose(ORDER_TYPE_SELL_STOP, sellZonePrice)) {
-            if(PlaceZoneStopOrder(ORDER_TYPE_SELL_STOP, sellZonePrice, "Zone Sell Initial")) {
-                g_LastZoneOrderPlacement = currentTime;
-            }
+        if(PlaceZoneStopOrder(ORDER_TYPE_SELL_STOP, sellZonePrice, "Zone Sell")) {
+            g_LastZoneOrderPlacement = currentTime; // CHỈ update nếu đặt lệnh thành công
         }
     }
 }
@@ -11877,103 +11768,59 @@ void PlaceZoneOrdersIfNeeded(double currentPrice, double centerPrice) {
 void ForceUpdateZoneOrdersForTimeframeChange(double newCenterPrice) {
     // Xóa tất cả pending orders zone cũ
     CancelAllZonePendingOrders();
-
+    
     double currentPrice = GetCleanPrice();
-
-    // SCALPING: Kiểm tra cooldown trước khi đặt lệnh mới
-    datetime currentTime = TimeCurrent();
-    if(currentTime - g_LastZoneOrderPlacement < ZONE_ORDER_PLACEMENT_COOLDOWN) {
-        return;
-    }
-
-    // Chỉ check có active positions không
+    
+    // Chỉ check có active positions không, không cần check distance từ centerPrice
     bool hasActiveBuyZone = HasActiveZonePositions(POSITION_TYPE_BUY);
     bool hasActiveSellZone = HasActiveZonePositions(POSITION_TYPE_SELL);
-
-    // SCALPING: Đếm số lượng zone orders
-    int buyZoneCount = CountZoneOrders(ORDER_TYPE_BUY_STOP);
-    int sellZoneCount = CountZoneOrders(ORDER_TYPE_SELL_STOP);
-
-    // Tính vị trí zone dựa trên giá hiện tại + ZoneStopDistance
+    
+    // FIXED: Tính vị trí zone dựa trên giá hiện tại + ZoneStopDistance
     double buyZonePrice = NormalizeDouble(currentPrice + ZoneStopDistance * _Point, _Digits);
     double sellZonePrice = NormalizeDouble(currentPrice - ZoneStopDistance * _Point, _Digits);
     // Cập nhật dynamic timeframe
-    g_DynamicTimeframe = GetOptimalTimeframe();
-
-    // SCALPING: Chỉ đặt nếu chưa đủ số lượng và không có active position
-    if(!hasActiveBuyZone && buyZoneCount < MAX_ZONE_ORDERS_PER_DIRECTION && EnableBuyOrders) {
-        if(!IsZoneOrderTooClose(ORDER_TYPE_BUY_STOP, buyZonePrice)) {
-            if(PlaceZoneStopOrder(ORDER_TYPE_BUY_STOP, buyZonePrice,
-                StringFormat("Zone Buy TF:%s", EnumToString(g_DynamicTimeframe)))) {
-                g_LastZoneOrderPlacement = currentTime;
-            }
-        }
+g_DynamicTimeframe = GetOptimalTimeframe();
+    // Đặt lệnh zone với khoảng cách cố định từ giá hiện tại
+    if(!hasActiveBuyZone && EnableBuyOrders) {
+        PlaceZoneStopOrder(ORDER_TYPE_BUY_STOP, buyZonePrice, 
+            StringFormat("Zone Buy TF:%s", EnumToString(g_DynamicTimeframe )));
     }
-
-    if(!hasActiveSellZone && sellZoneCount < MAX_ZONE_ORDERS_PER_DIRECTION && EnableSellOrders) {
-        if(!IsZoneOrderTooClose(ORDER_TYPE_SELL_STOP, sellZonePrice)) {
-            if(PlaceZoneStopOrder(ORDER_TYPE_SELL_STOP, sellZonePrice,
-                StringFormat("Zone Sell TF:%s", EnumToString(g_DynamicTimeframe)))) {
-                g_LastZoneOrderPlacement = currentTime;
-            }
-        }
+    
+    if(!hasActiveSellZone && EnableSellOrders) {
+        PlaceZoneStopOrder(ORDER_TYPE_SELL_STOP, sellZonePrice, 
+            StringFormat("Zone Sell TF:%s", EnumToString(g_DynamicTimeframe )));
     }
+    
+    g_LastZoneOrderPlacement = TimeCurrent();
 }
 
 // Sửa UpdateZoneOrdersForNewCandle
 void UpdateZoneOrdersForNewCandle(double newCenterPrice) {
-    // SCALPING: Kiểm tra cooldown trước
-    datetime currentTime = TimeCurrent();
-    if(currentTime - g_LastZoneOrderPlacement < ZONE_ORDER_PLACEMENT_COOLDOWN) {
-        return; // Không update nếu đang trong cooldown
-    }
-
     // Xóa tất cả pending orders zone cũ
     CancelAllZonePendingOrders();
-
+    
     double currentPrice = GetCleanPrice();
-
+    
     // Chỉ đặt lại nếu không có position zone active
     bool hasActiveBuyZone = HasActiveZonePositions(POSITION_TYPE_BUY);
     bool hasActiveSellZone = HasActiveZonePositions(POSITION_TYPE_SELL);
-
-    // SCALPING: Đếm số lượng zone orders
-    int buyZoneCount = CountZoneOrders(ORDER_TYPE_BUY_STOP);
-    int sellZoneCount = CountZoneOrders(ORDER_TYPE_SELL_STOP);
-
-    // SCALPING: Chỉ đặt nếu chưa đủ số lượng
-    if(!hasActiveBuyZone && buyZoneCount < MAX_ZONE_ORDERS_PER_DIRECTION && EnableBuyOrders) {
+    
+    // FIXED: Đặt zone orders cách giá hiện tại đúng ZoneStopDistance
+    if(!hasActiveBuyZone && EnableBuyOrders) {
         double buyZonePrice = NormalizeDouble(currentPrice + ZoneStopDistance * _Point, _Digits);
-        if(!IsZoneOrderTooClose(ORDER_TYPE_BUY_STOP, buyZonePrice)) {
-            if(PlaceZoneStopOrder(ORDER_TYPE_BUY_STOP, buyZonePrice, "Zone Buy Updated")) {
-                g_LastZoneOrderPlacement = currentTime;
-            }
-        }
+        PlaceZoneStopOrder(ORDER_TYPE_BUY_STOP, buyZonePrice, "Zone Buy Updated");
     }
-
-    if(!hasActiveSellZone && sellZoneCount < MAX_ZONE_ORDERS_PER_DIRECTION && EnableSellOrders) {
+    
+    if(!hasActiveSellZone && EnableSellOrders) {
         double sellZonePrice = NormalizeDouble(currentPrice - ZoneStopDistance * _Point, _Digits);
-        if(!IsZoneOrderTooClose(ORDER_TYPE_SELL_STOP, sellZonePrice)) {
-            if(PlaceZoneStopOrder(ORDER_TYPE_SELL_STOP, sellZonePrice, "Zone Sell Updated")) {
-                g_LastZoneOrderPlacement = currentTime;
-            }
-        }
+        PlaceZoneStopOrder(ORDER_TYPE_SELL_STOP, sellZonePrice, "Zone Sell Updated");
     }
 }
 
 // Sửa ManagePriceZoneStrategy để không check distance từ centerPrice
 void ManagePriceZoneStrategy() {
     if(!EnablePriceZoneStrategy) return;
-
-    // Kiểm tra có thể mở chu kỳ mới không (chặn nếu chu kỳ cũ chưa hoàn thành)
-    if(!CanOpenNewCycle(TRADE_ZONE)) {
-        // Nếu đang có lệnh Zone, cho phép DCA trong cùng chu kỳ
-        if(GetActiveTradeType() == TRADE_ZONE) {
-            ManageUnifiedDCA();
-        }
-        return;
-    }
-
+    
     // Hủy lệnh zone hết hạn trước
     CancelExpiredZoneOrders();
     
@@ -12044,46 +11891,18 @@ void CancelExpiredZoneOrders() {
         }
     }
 }
-// SCALPING: Đếm số lượng zone orders theo chiều
-int CountZoneOrders(ENUM_ORDER_TYPE orderType) {
-    int count = 0;
-    for(int i = OrdersTotal() - 1; i >= 0; i--) {
-        ulong ticket = OrderGetTicket(i);
-        if(!OrderSelect(ticket)) continue;
-        if(OrderGetString(ORDER_SYMBOL) != _Symbol) continue;
-
-        string comment = OrderGetString(ORDER_COMMENT);
-        if(StringFind(comment, "Zone") >= 0) {
-            ENUM_ORDER_TYPE pendingType = (ENUM_ORDER_TYPE)OrderGetInteger(ORDER_TYPE);
-            if(pendingType == orderType) {
-                count++;
-            }
-        }
-    }
-    return count;
-}
-
 // Hàm kiểm tra có pending zone orders không
 bool HasZonePendingOrders(ENUM_ORDER_TYPE orderType) {
-    return CountZoneOrders(orderType) > 0;
-}
-
-// SCALPING: Kiểm tra khoảng cách giữa zone orders
-bool IsZoneOrderTooClose(ENUM_ORDER_TYPE orderType, double newPrice) {
     for(int i = OrdersTotal() - 1; i >= 0; i--) {
         ulong ticket = OrderGetTicket(i);
         if(!OrderSelect(ticket)) continue;
         if(OrderGetString(ORDER_SYMBOL) != _Symbol) continue;
-
+        
         string comment = OrderGetString(ORDER_COMMENT);
         if(StringFind(comment, "Zone") >= 0) {
             ENUM_ORDER_TYPE pendingType = (ENUM_ORDER_TYPE)OrderGetInteger(ORDER_TYPE);
             if(pendingType == orderType) {
-                double existingPrice = OrderGetDouble(ORDER_PRICE_OPEN);
-                double distance = MathAbs(newPrice - existingPrice) / _Point;
-                if(distance < MIN_ZONE_ORDER_DISTANCE) {
-                    return true;
-                }
+                return true;
             }
         }
     }
@@ -12722,8 +12541,7 @@ void CleanupConflictingOrders() {
     }
     
     if(hasConflict) {
-        // Sử dụng ManageUnifiedDCA() thay vì HandleRegularDCA() để đảm bảo DCA đúng loại
-        ManageUnifiedDCA();
+    HandleRegularDCA();
     }
     return;
 
@@ -12801,7 +12619,6 @@ double volumeScore = GetVolumeProfileScore();
         CancelAllZonePendingOrders();
         
         // Kích hoạt lại DCA thông thường
-        ReactivateRegularDCA();
     }
 }
 
@@ -12843,38 +12660,22 @@ void ReactivateRegularDCA() {
     CheckAndOpenRegularDCAOrders(currentPrice);
 }
 
+
 // Đặt zone orders ban đầu
 void PlaceInitialZoneOrders(double currentPrice) {
-    // SCALPING: Kiểm tra cooldown
-    datetime currentTime = TimeCurrent();
-    if(currentTime - g_LastZoneOrderPlacement < ZONE_ORDER_PLACEMENT_COOLDOWN) {
-        return;
-    }
-
-    // SCALPING: Đếm số lượng zone orders
-    int buyZoneCount = CountZoneOrders(ORDER_TYPE_BUY_STOP);
-    int sellZoneCount = CountZoneOrders(ORDER_TYPE_SELL_STOP);
-
     // Đặt buy stop orders phía trên giá hiện tại
-    if(EnableBuyOrders && !HasActiveZonePositions(POSITION_TYPE_BUY) && buyZoneCount < MAX_ZONE_ORDERS_PER_DIRECTION) {
+    if(EnableBuyOrders && !HasActiveZonePositions(POSITION_TYPE_BUY)) {
         double buyZonePrice = NormalizeDouble(currentPrice + ZoneStopDistance * _Point, _Digits);
-        if(!IsZoneOrderTooClose(ORDER_TYPE_BUY_STOP, buyZonePrice)) {
-            if(PlaceZoneStopOrder(ORDER_TYPE_BUY_STOP, buyZonePrice, "Zone Buy Initial")) {
-                g_LastZoneOrderPlacement = currentTime;
-            }
-        }
+        PlaceZoneStopOrder(ORDER_TYPE_BUY_STOP, buyZonePrice, "Zone Buy Initial");
     }
-
-    // Đặt sell stop orders phía dưới giá hiện tại
-    if(EnableSellOrders && !HasActiveZonePositions(POSITION_TYPE_SELL) && sellZoneCount < MAX_ZONE_ORDERS_PER_DIRECTION) {
+    
+    // Đặt sell stop orders phía dưới giá hiện tại  
+    if(EnableSellOrders && !HasActiveZonePositions(POSITION_TYPE_SELL)) {
         double sellZonePrice = NormalizeDouble(currentPrice - ZoneStopDistance * _Point, _Digits);
-        if(!IsZoneOrderTooClose(ORDER_TYPE_SELL_STOP, sellZonePrice)) {
-            if(PlaceZoneStopOrder(ORDER_TYPE_SELL_STOP, sellZonePrice, "Zone Sell Initial")) {
-                g_LastZoneOrderPlacement = currentTime;
-            }
-        }
+        PlaceZoneStopOrder(ORDER_TYPE_SELL_STOP, sellZonePrice, "Zone Sell Initial");
     }
 }
+
 
 
 // Kiểm tra có thể mở lệnh DCA mới không
@@ -12912,11 +12713,15 @@ void CancelRegularDCAPendingOrders() {
     }
 }
 
-void RunFlexibleZoneStrategy() {
-    ManageFlexibleZoneStrategy();
-    
+bool RunFlexibleZoneStrategy() {
+                double currentpirce = GetCleanPrice();
+
     switch(g_CurrentMode) {
-      
+       case MODE_NORMAL:
+       ManageFlexibleZoneStrategy();
+CleanupPendingZoneOrders();
+            break;
+            
             
         case MODE_ZONE:
             if(g_ZoneModeActive) {
@@ -12929,9 +12734,10 @@ void RunFlexibleZoneStrategy() {
                 }
                 
                 if(canTradeBuyZone || canTradeSellZone) {
-                    ManagePriceZoneStrategy();
-                    // Sử dụng ManageUnifiedDCA() để đảm bảo DCA đúng loại chu kỳ
-                    ManageUnifiedDCA();
+           ManagePriceZoneStrategy();
+ManageZoneDCA();
+CleanupPendingZoneOrders();
+              
                 }
             }
             break;
@@ -12952,17 +12758,17 @@ void RunFlexibleZoneStrategy() {
             }
             
             if(g_RegularDCAActive && allowDCA) {
-                // Sử dụng ManageUnifiedDCA() cho regular DCA
-                ManageUnifiedDCA();
             }
             if(g_ZoneModeActive && allowZone) {
-                ManagePriceZoneStrategy();
-                // Sử dụng ManageUnifiedDCA() để đảm bảo DCA đúng loại chu kỳ
-                ManageUnifiedDCA();
             }
-            break;
+            
+ 
+   CleanupPendingZoneOrders();
+
+          break;
         }
     }
+    return false;
 }
 // FIX: LOGIC TÂM GIÁ CHO DCA THÔNG THƯỜNG
 // Thêm input mới cho regular DCA timeframe
@@ -13037,11 +12843,11 @@ bool HasStrongVolumeMomentum(ENUM_POSITION_TYPE posType) {
 ENUM_TIMEFRAMES GetDynamicTimeframe(double marketRange) {
     
     // Biến động rất mạnh → M5
-    if(marketRange > 5000) {
-        return PERIOD_M5;
+    if(marketRange > 50009) {
+        return PERIOD_H4;
     }
     // Biến động mạnh → M15
-    else if(marketRange > 30000) {
+    else if(marketRange > 11000) {
         return PERIOD_M15;
     }
     // Biến động trung bình → M30
@@ -13049,12 +12855,12 @@ ENUM_TIMEFRAMES GetDynamicTimeframe(double marketRange) {
         return PERIOD_M30;
     }
     // Biến động thấp → H1
-    else if(marketRange > 10000) {
+    else if(marketRange > 30000) {
         return PERIOD_H1;
     }
     // Biến động rất thấp → H4
     else {
-        return PERIOD_H4;
+        return PERIOD_M5;
     }
 }
 
@@ -13365,7 +13171,7 @@ RunFlexibleZoneStrategy();
 // Volume Profile Settings
 input int VolumeProfileBars = 500;           // Số nến để tính volume profile
 input double HighVolumeThreshold = 1.5;      // Ngưỡng HVN (1.5x volume trung bình)
-input double LowVolumeThreshold = 0.5;       // Ngưỡng LVN (0.5x volume trung bình)
+input double LowVolumeThreshold = 0.5;       // Ngưỡng LVN (0.5x volume trug bình)
 input bool TradeInLowVolume = true;          // true: trade ở LVN, false: trade ở HVN
 
 // Volume Profile Data
@@ -13539,16 +13345,7 @@ double GetSingleDirectionDCADistance(int orderNumber, ENUM_POSITION_TYPE posType
 
 void HandleSingleDirectionEntry() {
     if(g_DailyAllowedDirection == DAILY_BOTH) return;
-
-    // Kiểm tra có thể mở chu kỳ mới không (chặn nếu chu kỳ cũ chưa hoàn thành)
-    if(!CanOpenNewCycle(TRADE_BREAKOUT)) {
-        // Nếu đang có lệnh và là breakout, cho phép DCA trong cùng chu kỳ
-        if(GetActiveTradeType() == TRADE_BREAKOUT) {
-            ManageUnifiedDCA();
-        }
-        return;
-    }
-
+    
     double currentPrice = SymbolInfoDouble(_Symbol, SYMBOL_BID);
     
     // ===========================================================================
