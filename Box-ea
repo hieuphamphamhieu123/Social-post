@@ -198,6 +198,12 @@ input group "===== AI MARKET RANGE ====="
 input bool RequireAIConnection = false;        // Yêu c?u k?t n?i AI (true = không trading n?u AI offline)
 input int AIThresholdUpdateInterval = 60;      // Th?i gian c?p nh?t AI Threshold (giây)
 
+input group "===== AI-BASED STOP LOSS ====="
+input bool EnableAIBasedSL = true;             // Bật/tắt SL dựa trên AI
+input double AI_MarketRangeThreshold = 5000;   // Ngưỡng marketRange để kích hoạt SL
+input double AI_SL_Points = 500;               // Khoảng cách SL (points) từ lệnh cuối cùng
+input bool AI_BlockDCA_OnWrongDirection = true; // Ngăn DCA khi lệnh ngược hướng thị trường
+
 
 // Rest of the global variables remain the same
 // AI Threshold - bi?n toàn c?c ???c c?p nh?t t? AI
@@ -1330,10 +1336,16 @@ bool IsHighVolumeZone(double price, ENUM_POSITION_TYPE posType) {
 }
 
 void HandleZoneBuyDCA(double currentPrice) {
+    // AI-Based DCA Block Check for BUY
+    if(g_AI_BlockDCA_Buy) {
+        Print("🚫 Zone Buy DCA blocked by AI - Wrong market direction");
+        return;
+    }
+
     int zoneBuyCount = 0;
     double lastZoneBuyPrice = 0;
     datetime lastZoneBuyTime = 0;
-    
+
     // Count zone buy orders
     for(int i = PositionsTotal() - 1; i >= 0; i--) {
         ulong ticket = PositionGetTicket(i);
@@ -1381,10 +1393,16 @@ void HandleZoneBuyDCA(double currentPrice) {
 }
 
 void HandleZoneSellDCA(double currentPrice) {
+    // AI-Based DCA Block Check for SELL
+    if(g_AI_BlockDCA_Sell) {
+        Print("🚫 Zone Sell DCA blocked by AI - Wrong market direction");
+        return;
+    }
+
     int zoneSellCount = 0;
     double lastZoneSellPrice = 0;
     datetime lastZoneSellTime = 0;
-    
+
     // Count zone sell orders
     for(int i = PositionsTotal() - 1; i >= 0; i--) {
         ulong ticket = PositionGetTicket(i);
@@ -6645,6 +6663,16 @@ double GetPeriodExtraDistance() {
 
 
 void OpenDCAOrder(double currentPrice, ENUM_POSITION_TYPE posType) {
+    // AI-Based DCA Block Check
+    if(posType == POSITION_TYPE_BUY && g_AI_BlockDCA_Buy) {
+        Print("🚫 DCA Buy blocked by AI - Wrong market direction");
+        return;
+    }
+    if(posType == POSITION_TYPE_SELL && g_AI_BlockDCA_Sell) {
+        Print("🚫 DCA Sell blocked by AI - Wrong market direction");
+        return;
+    }
+
     double latestOrderPrice = GetLatestOrderPrice(posType);
     double requiredDistance = GetAdjustedDCADistanceEnhanced(posType == POSITION_TYPE_BUY ? g_TotalOrders_Buy : g_TotalOrders_Sell);
     double currentDistance = MathAbs(currentPrice - latestOrderPrice) / _Point;
@@ -8701,6 +8729,12 @@ double GetVolumeMultiplierAtPrice(double price) {
 }
 
 void HandleParallelDCA(double currentPrice) {
+    // AI-Based DCA Block Check
+    if(g_AI_BlockDCA_Buy || g_AI_BlockDCA_Sell) {
+        Print("🚫 Parallel DCA blocked by AI - Wrong market direction detected");
+        return;
+    }
+
     // Ki?m tra gi?i h?n chu k?
     if(!EnforcePeriodOrderLimits()) {
         Print("Gi?i h?n l?nh chu k? ?ã ??t - không th? m? l?nh m?i");
@@ -10092,11 +10126,13 @@ void ClosePositionsByType(ENUM_POSITION_TYPE posType) {
     }
 }
 // Thêm biến global
+// OLD SL LOGIC - DISABLED
+/*
 bool g_SL_Applied_Buy = false;
 bool g_SL_Applied_Sell = false;
 int g_CombinedSL_Threshold = 3; // Số lệnh tối thiểu để kích hoạt SL
 
-void UpdateDynamicSL() {
+void UpdateDynamicSL_OLD() {
     // Đếm số lệnh hiện tại
     
     // Kiểm tra điều kiện kích hoạt SL
@@ -10188,16 +10224,147 @@ void UpdateDynamicSL() {
         g_SL_Applied_Sell = true;
     }
 }
+*/
+// END OLD SL LOGIC
+
+//+------------------------------------------------------------------+
+//| NEW AI-Based Stop Loss Logic                                     |
+//+------------------------------------------------------------------+
+// Global variables for AI-based SL
+bool g_AI_SL_Active_Buy = false;
+bool g_AI_SL_Active_Sell = false;
+bool g_AI_BlockDCA_Buy = false;
+bool g_AI_BlockDCA_Sell = false;
+
+void AIBasedStopLoss() {
+    if(!EnableAIBasedSL) return;
+    if(!g_APIAvailable) return;
+
+    // Lấy imbalance và marketRange từ AI
+    double imbalance = GetAIImbalance();
+    double marketRange = CalculateMarketRange();
+
+    // Kiểm tra marketRange có vượt ngưỡng không
+    if(marketRange < AI_MarketRangeThreshold) {
+        // Market không đủ biến động, reset flags
+        g_AI_BlockDCA_Buy = false;
+        g_AI_BlockDCA_Sell = false;
+        return;
+    }
+
+    // Phân tích hướng thị trường dựa trên imbalance
+    bool marketBullish = (imbalance > 0);
+    bool marketBearish = (imbalance < 0);
+
+    // Kiểm tra lệnh ngược hướng
+    bool hasBuyOrders = (g_TotalOrders_Buy > 0);
+    bool hasSellOrders = (g_TotalOrders_Sell > 0);
+
+    bool buyOrdersWrongDirection = (marketBearish && hasBuyOrders);
+    bool sellOrdersWrongDirection = (marketBullish && hasSellOrders);
+
+    Print("🤖 AI-Based SL Check:");
+    Print("   Imbalance: ", imbalance, " | MarketRange: ", marketRange);
+    Print("   Buy Orders: ", g_TotalOrders_Buy, " | Sell Orders: ", g_TotalOrders_Sell);
+    Print("   Market Bullish: ", marketBullish, " | Market Bearish: ", marketBearish);
+    Print("   Buy Wrong Direction: ", buyOrdersWrongDirection, " | Sell Wrong Direction: ", sellOrdersWrongDirection);
+
+    // Xử lý Buy orders nếu ngược hướng
+    if(buyOrdersWrongDirection && !g_AI_SL_Active_Buy) {
+        ApplyAIStopLoss(POSITION_TYPE_BUY);
+        g_AI_SL_Active_Buy = true;
+        g_AI_BlockDCA_Buy = AI_BlockDCA_OnWrongDirection;
+        Print("⚠️ Buy orders đang ngược hướng thị trường! Đã đặt SL và chặn DCA BUY");
+    }
+
+    // Xử lý Sell orders nếu ngược hướng
+    if(sellOrdersWrongDirection && !g_AI_SL_Active_Sell) {
+        ApplyAIStopLoss(POSITION_TYPE_SELL);
+        g_AI_SL_Active_Sell = true;
+        g_AI_BlockDCA_Sell = AI_BlockDCA_OnWrongDirection;
+        Print("⚠️ Sell orders đang ngược hướng thị trường! Đã đặt SL và chặn DCA SELL");
+    }
+
+    // Reset flags nếu không còn lệnh
+    if(g_TotalOrders_Buy == 0) {
+        g_AI_SL_Active_Buy = false;
+        g_AI_BlockDCA_Buy = false;
+    }
+
+    if(g_TotalOrders_Sell == 0) {
+        g_AI_SL_Active_Sell = false;
+        g_AI_BlockDCA_Sell = false;
+    }
+}
+
+void ApplyAIStopLoss(ENUM_POSITION_TYPE posType) {
+    // Tìm lệnh cuối cùng (mới nhất)
+    datetime latestTime = 0;
+    double latestPrice = 0;
+
+    for(int i = PositionsTotal() - 1; i >= 0; i--) {
+        ulong ticket = PositionGetTicket(i);
+        if(!PositionSelectByTicket(ticket)) continue;
+        if(PositionGetString(POSITION_SYMBOL) != _Symbol) continue;
+        if(PositionGetInteger(POSITION_TYPE) != posType) continue;
+
+        datetime openTime = (datetime)PositionGetInteger(POSITION_TIME);
+        if(openTime > latestTime) {
+            latestTime = openTime;
+            latestPrice = PositionGetDouble(POSITION_PRICE_OPEN);
+        }
+    }
+
+    if(latestPrice == 0) return;
+
+    // Tính SL từ lệnh cuối cùng
+    double slPrice;
+    if(posType == POSITION_TYPE_BUY) {
+        slPrice = latestPrice - (AI_SL_Points * _Point);
+    } else {
+        slPrice = latestPrice + (AI_SL_Points * _Point);
+    }
+
+    slPrice = NormalizeDouble(slPrice, _Digits);
+
+    // Áp dụng SL cho tất cả lệnh cùng hướng
+    int updated = 0;
+    for(int i = PositionsTotal() - 1; i >= 0; i--) {
+        ulong ticket = PositionGetTicket(i);
+        if(!PositionSelectByTicket(ticket)) continue;
+        if(PositionGetString(POSITION_SYMBOL) != _Symbol) continue;
+        if(PositionGetInteger(POSITION_TYPE) != posType) continue;
+
+        double currentSL = PositionGetDouble(POSITION_SL);
+        double currentTP = PositionGetDouble(POSITION_TP);
+
+        // Chỉ update nếu SL khác hoặc chưa có SL
+        if(MathAbs(currentSL - slPrice) > _Point || currentSL == 0) {
+            if(trade.PositionModify(ticket, slPrice, currentTP)) {
+                updated++;
+                Print("✅ Updated SL for ticket #", ticket, " to ", slPrice);
+            }
+        }
+    }
+
+    Print("📊 AI-Based SL Applied: ", updated, " orders updated with SL at ", slPrice);
+}
 
 // Reset flags khi đóng hết lệnh
 void OnTradeTransaction(const MqlTradeTransaction& trans,
                        const MqlTradeRequest& request,
                        const MqlTradeResult& result) {
     if(trans.type == TRADE_TRANSACTION_DEAL_ADD) {
-        
-        // Reset flag nếu không còn lệnh
-        if(g_TotalOrders_Buy == 0) g_SL_Applied_Buy = false;
-        if(g_TotalOrders_Sell == 0) g_SL_Applied_Sell = false;
+
+        // Reset AI-based SL flags nếu không còn lệnh
+        if(g_TotalOrders_Buy == 0) {
+            g_AI_SL_Active_Buy = false;
+            g_AI_BlockDCA_Buy = false;
+        }
+        if(g_TotalOrders_Sell == 0) {
+            g_AI_SL_Active_Sell = false;
+            g_AI_BlockDCA_Sell = false;
+        }
     }
 }
 void OnTick() {
@@ -10242,7 +10409,8 @@ if(g_WaitingForCycleCompletion && g_InsideBox<g_CurrentAIThreshold) {
         
     }
 }
-UpdateDynamicSL();
+// UpdateDynamicSL(); // OLD - DISABLED
+AIBasedStopLoss(); // NEW AI-based SL logic
 // Tiếp tục logic bình thường nếu không đang chờ completion
     if(!IsSpreadOK()) return;
     if(!IsAIConnectionOK()) return;  // Check AI connection if required
@@ -12893,7 +13061,13 @@ static datetime g_LastSellOrderTime = 0;
 
 void HandleRegularDCA() {
     if(!IsSpreadOK()) return;
-    
+
+    // AI-Based DCA Block Check
+    if(g_AI_BlockDCA_Buy || g_AI_BlockDCA_Sell) {
+        Print("🚫 Regular DCA blocked by AI - Wrong market direction detected");
+        return;
+    }
+
     double currentPrice = GetCleanPrice();
     double marketRange = CalculateMarketRange();
     ENUM_TIMEFRAMES dynamicTF = GetDynamicTimeframe(marketRange);
