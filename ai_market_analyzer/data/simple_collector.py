@@ -12,12 +12,19 @@ from loguru import logger
 class SimpleCollector:
     """Simple collector using REST API polling instead of WebSocket"""
 
-    def __init__(self):
+    def __init__(self, update_interval=15):
         self.client = Client()  # No auth needed for public data
         self.symbol = 'PAXGUSDT'
         self.trades_buffer = deque(maxlen=1000)
         self.seen_trade_ids = set()  # Track để tránh duplicate
         self.is_running = False
+
+        # Rate limiting - Mặc định 15 giây để tránh rate limit
+        # 3 API calls x 4 requests/min = 12 requests/min (an toàn)
+        self.update_interval = update_interval  # Minimum seconds between API calls
+        self.last_update_time = 0  # Timestamp of last update
+        self.update_cooldown = 0  # Cooldown counter for rate limit errors
+        self.consecutive_rate_limits = 0  # Đếm số lần liên tiếp bị rate limit
 
         self.current_metrics = {
             'timestamp': None,
@@ -46,6 +53,24 @@ class SimpleCollector:
 
     def _update_data(self):
         """Update data from Binance REST API"""
+        current_time = time.time()
+
+        # Check cooldown period (if we hit rate limit previously)
+        if self.update_cooldown > 0:
+            if current_time < self.update_cooldown:
+                logger.debug(f"In cooldown period, skipping update. Cooldown ends in {self.update_cooldown - current_time:.1f}s")
+                return
+            else:
+                # Cooldown expired
+                self.update_cooldown = 0
+                logger.info("Cooldown period expired, resuming API calls")
+
+        # Check rate limit
+        time_since_last_update = current_time - self.last_update_time
+        if time_since_last_update < self.update_interval:
+            logger.debug(f"Rate limit: Skipping update (last update {time_since_last_update:.1f}s ago, interval={self.update_interval}s)")
+            return
+
         try:
             # Get recent trades
             trades = self.client.get_recent_trades(symbol=self.symbol, limit=100)
@@ -88,12 +113,38 @@ class SimpleCollector:
             logger.debug("Calling _calculate_metrics...")
             self._calculate_metrics(depth, current_price)
 
+            # Update last update time on success
+            self.last_update_time = current_time
+
+            # Reset consecutive rate limits on success
+            if self.consecutive_rate_limits > 0:
+                logger.info(f"✅ API calls successful, resetting rate limit counter")
+                self.consecutive_rate_limits = 0
+
             logger.info(f"Data updated: {len(self.trades_buffer)} total trades in buffer | {new_trades_count} new trades added")
 
         except Exception as e:
-            logger.error(f"Error updating data: {e}")
-            import traceback
-            logger.error(traceback.format_exc())
+            # Check if it's a rate limit error
+            if 'APIError(code=-1003)' in str(e) or 'Too much request weight' in str(e):
+                self.consecutive_rate_limits += 1
+
+                # Tự động tăng update_interval sau mỗi lần bị rate limit
+                if self.consecutive_rate_limits > 1:
+                    self.update_interval = min(self.update_interval * 1.5, 60)  # Max 60s
+                    logger.warning(f"⚠️ Multiple rate limits detected! Increasing update_interval to {self.update_interval:.1f}s")
+
+                # Set cooldown - tăng theo số lần liên tiếp bị rate limit
+                cooldown_time = 60 * self.consecutive_rate_limits  # 60s, 120s, 180s...
+                cooldown_time = min(cooldown_time, 300)  # Max 5 minutes
+                self.update_cooldown = time.time() + cooldown_time
+
+                logger.error(f"🚫 RATE LIMIT HIT (#{self.consecutive_rate_limits})! Cooldown for {cooldown_time}s")
+                logger.error(f"Current update_interval: {self.update_interval}s")
+                logger.error("SOLUTION: Use WebSocketCollector instead - set USE_WEBSOCKET=true")
+            else:
+                logger.error(f"Error updating data: {e}")
+                import traceback
+                logger.error(traceback.format_exc())
 
     def _calculate_metrics(self, depth, current_price):
         """Calculate metrics from collected data"""
@@ -179,7 +230,8 @@ class SimpleCollector:
 
     def get_current_metrics(self):
         """Get current metrics"""
-        # Update data before returning
+        # Update data before returning (với rate limiting tự động)
+        # Nếu gọi quá nhanh, _update_data() sẽ tự động skip để tránh rate limit
         if self.is_running:
             self._update_data()
 

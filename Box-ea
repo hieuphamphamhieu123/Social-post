@@ -81,23 +81,10 @@ input int OutsideHoursLifetime = 2880;        // Th?i gian t?n t?i l?nh ngoài c
 //+------------------------------------------------------------------+
 //| Nhóm cài ??t Take Profit                                          |
 //+------------------------------------------------------------------+
-input group "===== CÀI ??T TAKE PROFIT ====="
-input int CombinedTPLevel = 6;             // S? l?nh ?? kích ho?t TP chung
-input int Period1TP = 600;                 // Giai ?o?n 1 - TP chung 
-input int Period2TP = 300;                 // Giai ?o?n 2 - TP chung 
-input int Period3TP = 900;                // Giai ?o?n 3 - TP chung
+input group "===== CÀI ??T TP ??N GI?N ====="
+input int DefaultTP = 2000;  // TP m?c ??nh cho l?nh cu?i (points)
 input double g_TrendTP = 3000;              // TP lênh Trend
-input int FirstOrderTP = 2000;             // TP l?nh 1
-input int SecondOrderTP = 2000;            // TP l?nh 2
-input int ThirdOrderTP = 2000;             // TP l?nh 3
-input int FourthOrderTP = 2000;            // TP l?nh 4
-input int FifthOrderTP = 2000;             // TP l?nh 5
-input int SixthOrderTP = 2000;             // TP l?nh 6
-input int SeventhOrderTP = 2000;           // TP l?nh 7
-input int EighthOrderTP = 2000;            // TP l?nh 8
-input int NinthOrderTP = 2000;             // TP l?nh 9
-input int TenthOrderTP = 2000;             // TP l?nh 10
-input int StopLoss = 36999;                // Stop Loss
+input int CombinedTPLevel = 6;             // S? l?nh ?? kích ho?t TP chung (legacy - not used)
 
 
 //+------------------------------------------------------------------+
@@ -200,9 +187,9 @@ input int AIThresholdUpdateInterval = 60;      // Th?i gian c?p nh?t AI Threshol
 
 input group "===== AI-BASED STOP LOSS ====="
 input bool EnableAIBasedSL = true;             // Bật/tắt SL dựa trên AI
-input double AI_MarketRangeThreshold = 5000;   // Ngưỡng marketRange để kích hoạt SL
-input double AI_SL_Points = 500;               // Khoảng cách SL (points) từ lệnh cuối cùng
-input bool AI_BlockDCA_OnWrongDirection = true; // Ngăn DCA khi lệnh ngược hướng thị trường
+input double AI_MarketRangeThreshold = 5000;   // Ngưỡng marketRange để kích hoạt SL (points)
+input double AI_SL_Points = 500;               // Khoảng cách SL cố định (points) từ lệnh cuối cùng
+input bool AI_BlockDCA_OnWrongDirection = true; // Ngăn DCA khi lệnh ngược hướng với imbalance
 
 
 // Rest of the global variables remain the same
@@ -282,8 +269,9 @@ const int MIN_ORDER_MOD_INTERVAL = 5; // 5 seconds minimum between modifications
 
 // AI Imbalance Order Cooldown (for scalping)
 datetime g_LastAIOrderTime = 0;
-const int AI_ORDER_COOLDOWN = 60; // 60 seconds cooldown between AI imbalance orders
-const double AI_MIN_IMBALANCE_THRESHOLD = 0.15; // Minimum imbalance strength for scalping
+bool g_AI_OrderPending = false; // Flag để ngăn mở trùng lặp trong cùng 1 tick
+const int AI_ORDER_COOLDOWN = 1; // 60 seconds cooldown between AI imbalance orders
+const double AI_MIN_IMBALANCE_THRESHOLD = 0.1; // Minimum imbalance strength (15% imbalance on -1 to +1 scale)
 
 input group "===== CÀI ??T B?O V? TIN T?C ====="
 input bool EnableNewsProtection = true;     // B?t/t?t b?o v? tin t?c
@@ -642,14 +630,11 @@ g_InHedgeCycle = true;
         // For sell stop orders, set the stop price below current price
         stopPrice = currentPrice - (900 * _Point); // 5 pips below current price
     }
-    
-    
-    // Calculate take profit
-    double takeProfit = CalculateHedgeTP(orderType, stopPrice);
-    
+
+
     // Convert order type to stop order type
     ENUM_ORDER_TYPE stopOrderType = (orderType == ORDER_TYPE_BUY) ? ORDER_TYPE_BUY_STOP : ORDER_TYPE_SELL_STOP;
-    
+
     // Place stop order instead of market order
     trade.SetExpertMagicNumber(10051990); // Use a special magic number for hedges
     bool result = trade.OrderOpen(
@@ -659,7 +644,7 @@ g_InHedgeCycle = true;
         0, // Price is filled automatically for market orders
         stopPrice, // Stop price
         0, // No stop loss
-        takeProfit,
+        0, // No take profit
         0, // No expiration
         0, // No expiration time
         comment
@@ -1053,107 +1038,7 @@ void HandleHedging(double currentPrice) {
         g_InHedgeCycle = true;
     }
 }// Hàm c?p nh?t TP g?p cho t?t c? lo?i l?nh khi ?? s? l??ng
-void ModifyOrdersTPEnhanced(double currentPrice) {
-    // ??m l?nh và tính toán giá tr? trung bình cho t?ng lo?i l?nh
-    int buyCount = 0, sellCount = 0;
-    double buyWeightedSum = 0, sellWeightedSum = 0;
-    double buyVolume = 0, sellVolume = 0;
-    
-    // Theo dõi các lo?i l?nh
-    int buyRegularCount = 0, buyTrendCount = 0, buyZoneCount = 0, buyHedgeCount = 0;
-    int sellRegularCount = 0, sellTrendCount = 0, sellZoneCount = 0, sellHedgeCount = 0;
-    
-    // Tính trung bình có tr?ng s? cho t?t c? v? th?
-    for(int i = PositionsTotal() - 1; i >= 0; i--) {
-        ulong ticket = PositionGetTicket(i);
-        if(!PositionSelectByTicket(ticket)) continue;
-        if(PositionGetString(POSITION_SYMBOL) != _Symbol) continue;
-        
-        double volume = PositionGetDouble(POSITION_VOLUME);
-        double openPrice = PositionGetDouble(POSITION_PRICE_OPEN);
-        ENUM_POSITION_TYPE posType = (ENUM_POSITION_TYPE)PositionGetInteger(POSITION_TYPE);
-        string comment = PositionGetString(POSITION_COMMENT);
-        
-        // Phân lo?i l?nh
-        bool isTrend = (StringFind(comment, "Trend") >= 0);
-        bool isZone = (StringFind(comment, "Zone") >= 0);
-        bool isHedge = (StringFind(comment, "Hedge") >= 0);
-        bool isRegular = (!isTrend && !isZone && !isHedge);
-        
-        if(posType == POSITION_TYPE_BUY) {
-            buyCount++;
-            buyWeightedSum += openPrice * volume;
-            buyVolume += volume;
-            
-            // ??m s? l??ng t?ng lo?i l?nh
-            if(isRegular) buyRegularCount++;
-            else if(isTrend) buyTrendCount++;
-            else if(isZone) buyZoneCount++;
-            else if(isHedge) buyHedgeCount++;
-        } else {
-            sellCount++;
-            sellWeightedSum += openPrice * volume;
-            sellVolume += volume;
-            
-            // ??m s? l??ng t?ng lo?i l?nh
-            if(isRegular) sellRegularCount++;
-            else if(isTrend) sellTrendCount++;
-            else if(isZone) sellZoneCount++;
-            else if(isHedge) sellHedgeCount++;
-        }
-    }
-    
-
-    // X? lý TP cho l?nh Buy
-    if(buyCount >= CombinedTPLevel && buyVolume > 0) {
-        double avgBuyPrice = buyWeightedSum / buyVolume;
-        int tpPoints = GetPeriodTP();
-        double newBuyTP = NormalizeDouble(avgBuyPrice + tpPoints * _Point, _Digits);
-        
-        // Ki?m tra TP h?p l?
-        if(IsValidTPLevel(currentPrice, newBuyTP, POSITION_TYPE_BUY)) {
-            
-            // Áp d?ng TP m?i cho t?t c? l?nh Buy
-            for(int i = PositionsTotal() - 1; i >= 0; i--) {
-                ulong ticket = PositionGetTicket(i);
-                if(!PositionSelectByTicket(ticket)) continue;
-                if(PositionGetString(POSITION_SYMBOL) != _Symbol) continue;
-                if(PositionGetInteger(POSITION_TYPE) != POSITION_TYPE_BUY) continue;
-
-                // C?p nh?t TP ch? khi giá tr? khác
-                double currentTP = PositionGetDouble(POSITION_TP);
-                if(MathAbs(currentTP - newBuyTP) > _Point) {
-                    trade.PositionModify(ticket, 0, newBuyTP);
-                }
-            }
-        }
-    }
-    
-    // X? lý TP cho l?nh Sell
-    if(sellCount >= CombinedTPLevel && sellVolume > 0) {
-        double avgSellPrice = sellWeightedSum / sellVolume;
-        int tpPoints = GetPeriodTP();
-        double newSellTP = NormalizeDouble(avgSellPrice - tpPoints * _Point, _Digits);
-        
-        // Ki?m tra TP h?p l?
-        if(IsValidTPLevel(currentPrice, newSellTP, POSITION_TYPE_SELL)) {
-            
-            // Áp d?ng TP m?i cho t?t c? l?nh Sell
-            for(int i = PositionsTotal() - 1; i >= 0; i--) {
-                ulong ticket = PositionGetTicket(i);
-                if(!PositionSelectByTicket(ticket)) continue;
-                if(PositionGetString(POSITION_SYMBOL) != _Symbol) continue;
-                if(PositionGetInteger(POSITION_TYPE) != POSITION_TYPE_SELL) continue;
-
-                // C?p nh?t TP ch? khi giá tr? khác
-                double currentTP = PositionGetDouble(POSITION_TP);
-                if(MathAbs(currentTP - newSellTP) > _Point) {
-                    trade.PositionModify(ticket, 0, newSellTP);
-                }
-            }
-        }
-    }
-}// Hàm ki?m tra l?i nhu?n ??t m?c tiêu hàng ngày và ?óng t?t c? các l?nh
+// Hàm ki?m tra l?i nhu?n ??t m?c tiêu hàng ngày và ?óng t?t c? các l?nh
 bool CheckAndCloseOnDailyProfitTarget() {
     // B? qua n?u không b?t tính n?ng ho?c ?ã ??t m?c tiêu
     if(!EnableDailyProfitLimit || g_DailyTargetHit) return false;
@@ -1338,7 +1223,7 @@ bool IsHighVolumeZone(double price, ENUM_POSITION_TYPE posType) {
 void HandleZoneBuyDCA(double currentPrice) {
     // AI-Based DCA Block Check for BUY
     if(g_AI_BlockDCA_Buy) {
-        Print("🚫 Zone Buy DCA blocked by AI - Wrong market direction");
+
         return;
     }
 
@@ -1377,15 +1262,14 @@ void HandleZoneBuyDCA(double currentPrice) {
         
         if(distance >= requiredDistance) {
             double lotSize = CalculateZoneDCALotSize(zoneBuyCount + 1);
-            double takeProfit = CalculateOrderTP(ORDER_TYPE_BUY, currentPrice, zoneBuyCount + 1);
             string comment = StringFormat("Zone Buy DCA #%d", zoneBuyCount + 1);
-            
-            if(trade.PositionOpen(_Symbol, ORDER_TYPE_BUY, lotSize, currentPrice, 0, takeProfit, comment)) {
+
+            if(trade.PositionOpen(_Symbol, ORDER_TYPE_BUY, lotSize, currentPrice, 0, 0, comment)) {
                 UpdatePeriodOrderCount();
                 
                 int newZoneBuyCount = zoneBuyCount + 1;
                 if(newZoneBuyCount >= CombinedTPLevel) {
-                    UpdateCombinedTP(POSITION_TYPE_BUY, false);
+                    // UpdateCombinedTP(POSITION_TYPE_BUY, false);
                 }
             }
         }
@@ -1395,7 +1279,7 @@ void HandleZoneBuyDCA(double currentPrice) {
 void HandleZoneSellDCA(double currentPrice) {
     // AI-Based DCA Block Check for SELL
     if(g_AI_BlockDCA_Sell) {
-        Print("🚫 Zone Sell DCA blocked by AI - Wrong market direction");
+
         return;
     }
 
@@ -1434,15 +1318,14 @@ void HandleZoneSellDCA(double currentPrice) {
         
         if(distance >= requiredDistance) { // FIX: >= thay vì 
             double lotSize = CalculateZoneDCALotSize(zoneSellCount + 1);
-            double takeProfit = CalculateOrderTP(ORDER_TYPE_SELL, currentPrice, zoneSellCount + 1);
             string comment = StringFormat("Zone Sell DCA #%d", zoneSellCount + 1);
-            
-            if(trade.PositionOpen(_Symbol, ORDER_TYPE_SELL, lotSize, currentPrice, 0, takeProfit, comment)) {
+
+            if(trade.PositionOpen(_Symbol, ORDER_TYPE_SELL, lotSize, currentPrice, 0, 0, comment)) {
                 UpdatePeriodOrderCount();
                 
                 int newZoneSellCount = zoneSellCount + 1;
                 if(newZoneSellCount >= CombinedTPLevel) {
-                    UpdateCombinedTP(POSITION_TYPE_SELL, false);
+                    // UpdateCombinedTP(POSITION_TYPE_SELL, false);
                 }
             }
         }
@@ -1476,40 +1359,6 @@ AllowedDirection GetMFIDirection() {
     return DIR_BOTH;
 }
 // Sửa hàm CalculateOrderTP để sử dụng đúng input TP parameters
-double CalculateOrderTP(ENUM_ORDER_TYPE orderType, double price, int orderNumber) {
-    // Individual orders: Luôn dùng input TP parameters
-    if(orderNumber < CombinedTPLevel) {
-        double tpPoints = GetOrderTP(orderNumber);
-        return (orderType == ORDER_TYPE_BUY) ?
-               NormalizeDouble(price + tpPoints * _Point, _Digits) :
-               NormalizeDouble(price - tpPoints * _Point, _Digits);
-    }
-    
-    // Combined TP: Dùng input TP cho weighted average
-    double weightedSum = price;
-    double totalVolume = 1.0;
-    
-    for(int i = PositionsTotal() - 1; i >= 0; i--) {
-        ulong ticket = PositionGetTicket(i);
-        if(!PositionSelectByTicket(ticket)) continue;
-        if(PositionGetString(POSITION_SYMBOL) != _Symbol) continue;
-        if(PositionGetInteger(POSITION_TYPE) != (orderType == ORDER_TYPE_BUY ? POSITION_TYPE_BUY : POSITION_TYPE_SELL)) continue;
-        
-        double volume = PositionGetDouble(POSITION_VOLUME);
-        double openPrice = PositionGetDouble(POSITION_PRICE_OPEN);
-        weightedSum += openPrice * volume;
-        totalVolume += volume;
-    }
-    
-    double avgPrice = NormalizeDouble(weightedSum / totalVolume, _Digits);
-    
-    // FIX: Dùng input TP thay vì Period TP cho combined
-    double tpPoints = GetOrderTP(orderNumber); // Sử dụng input TP parameters
-    
-    return (orderType == ORDER_TYPE_BUY) ?
-           NormalizeDouble(avgPrice + tpPoints * _Point, _Digits) :
-           NormalizeDouble(avgPrice - tpPoints * _Point, _Digits);
-}
 
 
 // LỖI 5: CheckMinimumDistanceBetweenOrders có thể cho phép mở lệnh quá gần
@@ -2360,8 +2209,7 @@ void UpdateAIThreshold() {
         g_CurrentAIThreshold = currentRange;
         g_LastThresholdUpdate = TimeCurrent();
 
-        Print("✅ AI Threshold Updated: ", g_CurrentAIThreshold,
-              " (Was: ", MarketRangeThreshold, ")");
+
     }
     else {
         // N?u không l?y ???c t? AI, gi? nguyên giá tr? c? ho?c dùng m?c ??nh
@@ -2369,7 +2217,6 @@ void UpdateAIThreshold() {
             g_CurrentAIThreshold = MarketRangeThreshold;
         }
 
-        Print("⚠️ AI Threshold not updated, using: ", g_CurrentAIThreshold);
     }
 }
 
@@ -2940,57 +2787,6 @@ void AnalyzeOrderGroups(OrderGroup &buyGroup, OrderGroup &sellGroup) {
 }
 
 // Modified TP calculation for parallel DCA
-void UpdateParallelTPLevels(ENUM_POSITION_TYPE posType) {
-    OrderGroup group;
-    group.Initialize();
-    
-    double regularWeightedSum = 0, hedgeWeightedSum = 0;
-    double regularVolume = 0, hedgeVolume = 0;
-    
-    // Calculate separate weighted averages for regular and hedge orders
-    for(int i = PositionsTotal() - 1; i >= 0; i--) {
-        ulong ticket = PositionGetTicket(i);
-        if(!PositionSelectByTicket(ticket)) continue;
-        if(PositionGetString(POSITION_SYMBOL) != _Symbol) continue;
-        if(PositionGetInteger(POSITION_TYPE) != posType) continue;
-        
-        double volume = PositionGetDouble(POSITION_VOLUME);
-        double openPrice = PositionGetDouble(POSITION_PRICE_OPEN);
-        string comment = PositionGetString(POSITION_COMMENT);
-        
-        if(StringFind(comment, "Hedge") >= 0) {
-            hedgeWeightedSum += openPrice * volume;
-            hedgeVolume += volume;
-            group.hedgeCount++;
-        } else {
-            regularWeightedSum += openPrice * volume;
-            regularVolume += volume;
-            group.regularCount++;
-        }
-    }
-    
-    // Update TP for regular orders if they exist
-    if(regularVolume > 0) {
-        double avgPrice = regularWeightedSum / regularVolume;
-        double tpPoints = group.regularCount >= CombinedTPLevel ? GetPeriodTP() : GetOrderTP(group.regularCount);
-        double newTP = posType == POSITION_TYPE_BUY ? 
-                      avgPrice + tpPoints * _Point :
-                      avgPrice - tpPoints * _Point;
-                      
-        UpdateGroupTP(posType, false, newTP);
-    }
-    
-    // Update TP for hedge orders if they exist
-    if(hedgeVolume > 0) {
-        double avgPrice = hedgeWeightedSum / hedgeVolume;
-        double newTP = CalculateHedgeTP(
-            posType == POSITION_TYPE_BUY ? ORDER_TYPE_BUY : ORDER_TYPE_SELL,
-            avgPrice
-        );
-        
-        UpdateGroupTP(posType, true, newTP);
-    }
-}
 
 // Helper function to update TP for specific order group
 void UpdateGroupTP(ENUM_POSITION_TYPE posType, bool isHedge, double newTP) {
@@ -3008,7 +2804,8 @@ void UpdateGroupTP(ENUM_POSITION_TYPE posType, bool isHedge, double newTP) {
                 // Ch? c?p nh?t n?u TP khác giá tr? hi?n t?i
                 double currentTP = PositionGetDouble(POSITION_TP);
                 if(MathAbs(currentTP - newTP) > _Point) {
-                    trade.PositionModify(ticket, 0, newTP);
+                    double currentSL = PositionGetDouble(POSITION_SL);
+                    trade.PositionModify(ticket, currentSL, newTP);
                 }
             }
         }
@@ -3218,7 +3015,9 @@ double CalculateRecoveryTP(ENUM_ORDER_TYPE orderType, double entryPrice) {
 
 // Update the UpdateRecoveryCombinedTP function to only activate after a threshold
 void UpdateRecoveryCombinedTP() {
-    
+    // DISABLED: Using virtual TP/SL system instead
+    return;
+
     // Limit update frequency (every 5 seconds)
     static datetime lastTPUpdate = 0;
     datetime currentTime = TimeCurrent();
@@ -3268,25 +3067,13 @@ void UpdateRecoveryCombinedTP() {
     double avgPrice = NormalizeDouble(weightedSum / totalVolume, _Digits);
     
     // Get current period TP based on current hour
-    int tpPoints = GetPeriodTP();
+    // int tpPoints = GetPeriodTP(); // DISABLED: Using virtual TP/SL
     
     // Calculate TP level
-    double newTP = 0;
-    if(mainPositionType == POSITION_TYPE_BUY) {
-        newTP = NormalizeDouble(avgPrice + tpPoints * _Point, _Digits);
-    } else {
-        newTP = NormalizeDouble(avgPrice - tpPoints * _Point, _Digits);
-    }
+ 
+
     
-    // Verify the calculated TP is valid
-    double currentPrice = GetCleanPrice();
-    bool validTP = (mainPositionType == POSITION_TYPE_BUY) ? 
-                  (newTP > currentPrice) : 
-                  (newTP < currentPrice);
-    
-    if(!validTP) {
-        return;
-    }
+
     
     // Update TP for all recovery orders
     int updatedCount = 0;
@@ -3299,10 +3086,9 @@ void UpdateRecoveryCombinedTP() {
         if(StringFind(comment, "Recovery") >= 0) {
             // Only update if current TP is different
             double currentTP = PositionGetDouble(POSITION_TP);
-            if(MathAbs(currentTP - newTP) > _Point) {
-                if(trade.PositionModify(ticket, 0, newTP)) {
-                    updatedCount++;
-                }
+            if(MathAbs(currentTP ) > _Point) {
+                double currentSL = PositionGetDouble(POSITION_SL);
+           
             }
         }
     }
@@ -3378,12 +3164,8 @@ bool OpenRecoveryDCAOrder(ENUM_ORDER_TYPE orderType, double volume, double curre
         }
         
         double avgPrice = NormalizeDouble(weightedSum / totalVolume, _Digits);
-        int tpPoints = GetPeriodTP();
-        
-        takeProfit = (orderType == ORDER_TYPE_BUY) ?
-                    NormalizeDouble(avgPrice + tpPoints * _Point, _Digits) :
-                    NormalizeDouble(avgPrice - tpPoints * _Point, _Digits);
-                    
+        // int tpPoints = GetPeriodTP(); // DISABLED: Using virtual TP/SL
+          
     }
     else {
         // For initial orders, use trend TP for individual TP
@@ -3394,13 +3176,13 @@ bool OpenRecoveryDCAOrder(ENUM_ORDER_TYPE orderType, double volume, double curre
     }
     
     // Prepare comment for the recovery DCA order - INCLUDE CYCLE ID
-    string comment = StringFormat("Recovery DCA %s #%d Cycle %d", 
+    string comment = StringFormat("Recovery DCA %s #%d Cycle %d",
                                 EnumToString(orderType),
                                 currentCycleOrderCount + 1,
                                 g_CurrentRecoveryCycleId);
-    
-    // Open the order with the calculated TP
-    if(trade.PositionOpen(_Symbol, orderType, volume, currentPrice, 0, takeProfit, comment)) {
+
+    // Open the order without TP and SL
+    if(trade.PositionOpen(_Symbol, orderType, volume, currentPrice, 0, 0, comment)) {
         g_RecoveryOrderCount++;
         g_RecoveryTotalVolume += volume;
         
@@ -3489,12 +3271,12 @@ void RetryRecoveryOrder(ENUM_ORDER_TYPE orderType, double volume, string comment
                       SymbolInfoDouble(_Symbol, SYMBOL_BID);
     
     // Calculate simplified TP
-    double tp = (orderType == ORDER_TYPE_BUY) ? 
-               entryPrice + 300 * _Point : 
+    double tp = (orderType == ORDER_TYPE_BUY) ?
+               entryPrice + 300 * _Point :
                entryPrice - 300 * _Point;
-    
-    
-    if(trade.PositionOpen(_Symbol, orderType, volume, entryPrice, 0, tp, comment)) {
+
+    // Open order without TP/SL
+    if(trade.PositionOpen(_Symbol, orderType, volume, entryPrice, 0, 0, comment)) {
         g_RecoveryOrderTicket = trade.ResultOrder();
         g_RecoveryAttempts++;
         g_RecoveryOrderOpenTime = TimeCurrent(); // Record open time for retry as well
@@ -4592,8 +4374,6 @@ bool IsAIConnectionOK() {
       static datetime lastWarning = 0;
       // Log warning m?i 5 phút
       if(TimeCurrent() - lastWarning > 300) {
-         Print("⛔ TRADING DISABLED: AI connection required but API is offline!");
-         Print("   Set RequireAIConnection = false to allow trading without AI");
          lastWarning = TimeCurrent();
       }
       return false;
@@ -5161,7 +4941,7 @@ bool CanOpenOrderType(ENUM_ORDER_TYPE orderType, string orderComment) {
 
 // New function to calculate hedge TP
 double CalculateHedgeTP(ENUM_ORDER_TYPE orderType, double entryPrice) {
-    double baseTP = FirstOrderTP; // Use trend TP as base
+    double baseTP = 1; // Use trend TP as base
     
     // Calculate volatility-adjusted TP
     double marketRange = CalculateMarketRange();
@@ -5504,112 +5284,8 @@ bool CloseAllPositionsEarly(int minOrderCount, double minProfit) {
 // FIX: TP CALCULATION SỬ DỤNG ĐÚNG INPUT PARAMETERS
 
 
-// Sửa hàm UpdateCombinedTP để sử dụng đúng input TP
-void UpdateCombinedTP(ENUM_POSITION_TYPE posType, bool includeTrendOrders = true) {
-    double weightedSum = 0;
-    double totalVolume = 0;
-    int orderCount = 0;
-    
-    // Đếm orders để kiểm tra combined TP threshold
-    for(int i = PositionsTotal() - 1; i >= 0; i--) {
-        ulong ticket = PositionGetTicket(i);
-        if(!PositionSelectByTicket(ticket)) continue;
-        if(PositionGetString(POSITION_SYMBOL) != _Symbol) continue;
-        if(PositionGetInteger(POSITION_TYPE) != posType) continue;
-        
-        string comment = PositionGetString(POSITION_COMMENT);
-        bool isTrendOrder = (StringFind(comment, "Trend Follow") >= 0);
-        bool isHedgeOrder = (StringFind(comment, "Hedge") >= 0);
-        
-        if(!includeTrendOrders && isTrendOrder) continue;
-        if(isHedgeOrder) continue;
-        
-        orderCount++;
-    }
-    
-    // Chỉ áp dụng combined TP nếu đủ orders
-    if(orderCount < CombinedTPLevel) return;
-    
-    // Tính weighted average
-    for(int i = PositionsTotal() - 1; i >= 0; i--) {
-        ulong ticket = PositionGetTicket(i);
-        if(!PositionSelectByTicket(ticket)) continue;
-        if(PositionGetString(POSITION_SYMBOL) != _Symbol) continue;
-        if(PositionGetInteger(POSITION_TYPE) != posType) continue;
-        
-        string comment = PositionGetString(POSITION_COMMENT);
-        bool isTrendOrder = (StringFind(comment, "Trend Follow") >= 0);
-        bool isHedgeOrder = (StringFind(comment, "Hedge") >= 0);
-        
-        if(!includeTrendOrders && isTrendOrder) continue;
-        if(isHedgeOrder) continue;
-        
-        double volume = PositionGetDouble(POSITION_VOLUME);
-        double openPrice = PositionGetDouble(POSITION_PRICE_OPEN);
-        weightedSum += openPrice * volume;
-        totalVolume += volume;
-    }
-    
-    if(totalVolume <= 0) return;
-    
-    double averagePrice = NormalizeDouble(weightedSum / totalVolume, _Digits);
-    
-    // FIX: Sử dụng input TP parameters thay vì Period TP
-    double tpPoints = GetOrderTP(orderCount); // Dùng input TP cho order hiện tại
-    
-    double newTP = (posType == POSITION_TYPE_BUY) ?
-                   NormalizeDouble(averagePrice + tpPoints * _Point, _Digits) :
-                   NormalizeDouble(averagePrice - tpPoints * _Point, _Digits);
-    
-    // Kiểm tra TP hợp lệ
-    double currentPrice = GetCleanPrice();
-    if(!IsValidTPLevel(currentPrice, newTP, posType)) {
-        return;
-    }
-    
-    // Cập nhật TP cho tất cả orders
-    int updatedCount = 0;
-    for(int i = PositionsTotal() - 1; i >= 0; i--) {
-        ulong ticket = PositionGetTicket(i);
-        if(!PositionSelectByTicket(ticket)) continue;
-        if(PositionGetString(POSITION_SYMBOL) != _Symbol) continue;
-        if(PositionGetInteger(POSITION_TYPE) != posType) continue;
-        
-        string comment = PositionGetString(POSITION_COMMENT);
-        bool isTrendOrder = (StringFind(comment, "Trend Follow") >= 0);
-        bool isHedgeOrder = (StringFind(comment, "Hedge") >= 0);
-        
-        if(!includeTrendOrders && isTrendOrder) continue;
-        if(isHedgeOrder) continue;
-        
-        // Chỉ cập nhật nếu TP khác
-        double currentTP = PositionGetDouble(POSITION_TP);
-        if(MathAbs(currentTP - newTP) > _Point) {
-            if(trade.PositionModify(ticket, 0, newTP)) {
-                updatedCount++;
-            }
-        }
-    }
-}
 
 // Cải tiến hàm GetOrderTP để handle trường hợp orderNumber > 10
-double GetOrderTP(int orderNumber) {
-    switch(orderNumber) {
-        case 1: return FirstOrderTP;
-        case 2: return SecondOrderTP;
-        case 3: return ThirdOrderTP;
-        case 4: return FourthOrderTP;
-        case 5: return FifthOrderTP;
-        case 6: return SixthOrderTP;
-        case 7: return SeventhOrderTP;
-        case 8: return EighthOrderTP;
-        case 9: return NinthOrderTP;
-        case 10: return TenthOrderTP;
-        default: 
-            // FIX: Với orders > 10, dùng TenthOrderTP thay vì Period1TP
-            return TenthOrderTP;
-    }
-}
 
 // Sửa OpenOrder để đảm bảo dùng đúng TP calculation
 bool OpenOrder(ENUM_ORDER_TYPE orderType, double lotSize, double currentPrice, string customComment = "") {
@@ -5634,35 +5310,11 @@ bool OpenOrder(ENUM_ORDER_TYPE orderType, double lotSize, double currentPrice, s
                              
     }
     
-    // FIX: Luôn dùng input TP parameters
-    double takeProfit = CalculateOrderTP(orderType, currentPrice, totalOrders + 1);
-    
-    // Stop loss
-    double stopLoss = 0;
-    if(StopLoss > 0) {
-        if(orderType == ORDER_TYPE_BUY) {
-            stopLoss = NormalizeDouble(currentPrice - StopLoss * _Point, _Digits);
-        } else {
-            stopLoss = NormalizeDouble(currentPrice + StopLoss * _Point, _Digits);
-        }
-    }
-    
-    // Kiểm tra TP hợp lệ
-    if(!IsValidTPLevel(currentPrice, takeProfit, posType)) {
-        return false;
-    }
-    
-    // Mở lệnh
-    bool result = trade.PositionOpen(_Symbol, orderType, lotSize, currentPrice, stopLoss, takeProfit, comment);
-    
+    // Mở lệnh without TP/SL
+    bool result = trade.PositionOpen(_Symbol, orderType, lotSize, currentPrice, 0, 0, comment);
+
     if(result) {
         UpdatePeriodOrderCount();
-        
-        // Cập nhật combined TP nếu cần
-        int newOrderCount = totalOrders + 1;
-        if(newOrderCount >= CombinedTPLevel && !isZoneOrder) {
-            UpdateCombinedTP(posType, false);
-        }
     }
 
     return result;
@@ -5675,28 +5327,33 @@ bool OpenOrder(ENUM_ORDER_TYPE orderType, double lotSize, double currentPrice, s
 //| - Imbalance = 0: Không mở lệnh                                    |
 //+------------------------------------------------------------------+
 bool OpenOrderByAIImbalance(double lotSize = 0, string customComment = "") {
+    // CRITICAL: Kiểm tra flag để ngăn mở trùng lặp trong cùng 1 tick
+    if(g_AI_OrderPending) {
+        return false;
+    }
+
     // SCALPING: Kiểm tra cooldown để tránh mở nhiều lệnh liên tục
     datetime currentTime = TimeCurrent();
     if(currentTime - g_LastAIOrderTime < AI_ORDER_COOLDOWN) {
-        Print("⏳ AI Order Cooldown - Chờ ", AI_ORDER_COOLDOWN - (currentTime - g_LastAIOrderTime), " giây nữa");
         return false;
     }
 
     // Kiểm tra kết nối AI
     if(!g_APIAvailable) {
-        Print("⚠️ AI API không khả dụng - Không thể mở lệnh theo imbalance");
         return false;
     }
+
+    // Đặt flag để ngăn các lần gọi khác trong cùng tick
+    g_AI_OrderPending = true;
 
     // Lấy imbalance từ AI
     double imbalance = GetAIImbalance();
 
     // Log imbalance value
-    Print("📊 AI Imbalance: ", imbalance);
 
     // SCALPING: Kiểm tra ngưỡng tối thiểu cho scalping
     if(MathAbs(imbalance) < AI_MIN_IMBALANCE_THRESHOLD) {
-        Print("⚠️ Imbalance yếu (", imbalance, ") < ngưỡng tối thiểu (", AI_MIN_IMBALANCE_THRESHOLD, ") - Không phù hợp scalping");
+        g_AI_OrderPending = false; // Reset flag
         return false;
     }
 
@@ -5715,17 +5372,17 @@ bool OpenOrderByAIImbalance(double lotSize = 0, string customComment = "") {
         direction = "SELL";
     } else {
         // Imbalance = 0 → Không có tín hiệu
-        Print("⚠️ Imbalance = 0 - Không có tín hiệu giao dịch");
+        g_AI_OrderPending = false; // Reset flag
         return false;
     }
 
     // SCALPING: Kiểm tra xung đột - tránh mở nhiều lệnh cùng chiều
     if(orderType == ORDER_TYPE_BUY && g_TotalOrders_Buy > 0) {
-        Print("⚠️ Đã có ", g_TotalOrders_Buy, " lệnh BUY - Không mở thêm AI imbalance BUY (tránh xung đột)");
+        g_AI_OrderPending = false; // Reset flag
         return false;
     }
     if(orderType == ORDER_TYPE_SELL && g_TotalOrders_Sell > 0) {
-        Print("⚠️ Đã có ", g_TotalOrders_Sell, " lệnh SELL - Không mở thêm AI imbalance SELL (tránh xung đột)");
+        g_AI_OrderPending = false; // Reset flag
         return false;
     }
 
@@ -5743,63 +5400,51 @@ bool OpenOrderByAIImbalance(double lotSize = 0, string customComment = "") {
         comment = StringFormat("AI-%s (Imb:%.2f)", direction, imbalance);
     }
 
-    // Log thông tin
-    Print("🤖 AI Imbalance Signal:");
-    Print("   Direction: ", direction, " (Imbalance: ", imbalance, ")");
-    Print("   Price: ", currentPrice);
-    Print("   Lot Size: ", finalLotSize);
-    Print("   Comment: ", comment);
+
 
     // Kiểm tra điều kiện cơ bản
     if(!EnforcePeriodOrderLimits()) {
-        Print("⚠️ Vượt quá giới hạn lệnh trong giai đoạn");
+        g_AI_OrderPending = false; // Reset flag
         return false;
     }
 
     if(!CanOpenMoreOrdersInPeriod()) {
-        Print("⚠️ Không thể mở thêm lệnh trong giai đoạn này");
+        g_AI_OrderPending = false; // Reset flag
         return false;
     }
 
     // SCALPING: Tính TP cố định 400 points cho scalping nhanh
     ENUM_POSITION_TYPE posType = (orderType == ORDER_TYPE_BUY) ? POSITION_TYPE_BUY : POSITION_TYPE_SELL;
     int totalOrders = (posType == POSITION_TYPE_BUY) ? g_TotalOrders_Buy : g_TotalOrders_Sell;
-    const int SCALPING_TP_POINTS = 400; // TP cố định cho scalping
+    const int SCALPING_TP_POINTS = DefaultTP; // TP cố định cho scalping
     double takeProfit;
     if(orderType == ORDER_TYPE_BUY) {
-        takeProfit = NormalizeDouble(currentPrice + SCALPING_TP_POINTS * _Point, _Digits);
+        takeProfit = NormalizeDouble(currentPrice + DefaultTP * _Point, _Digits);
     } else {
-        takeProfit = NormalizeDouble(currentPrice - SCALPING_TP_POINTS * _Point, _Digits);
+        takeProfit = NormalizeDouble(currentPrice - DefaultTP * _Point, _Digits);
     }
 
-    // Tính SL nếu cần
-    double stopLoss = 0;
-    if(StopLoss > 0) {
-        if(orderType == ORDER_TYPE_BUY) {
-            stopLoss = NormalizeDouble(currentPrice - StopLoss * _Point, _Digits);
-        } else {
-            stopLoss = NormalizeDouble(currentPrice + StopLoss * _Point, _Digits);
-        }
-    }
+    // Tính SL - Ưu tiên AI SL nếu được bật
+    double stopLoss = CalculateAISL(orderType, currentPrice);
 
+  
     // Kiểm tra TP hợp lệ
     if(!IsValidTPLevel(currentPrice, takeProfit, posType)) {
-        Print("⚠️ TP không hợp lệ");
+        g_AI_OrderPending = false; // Reset flag
         return false;
     }
 
-    // Mở lệnh
-    bool result = trade.PositionOpen(_Symbol, orderType, finalLotSize, currentPrice, stopLoss, takeProfit, comment);
+    // Mở lệnh without TP/SL
+    bool result = trade.PositionOpen(_Symbol, orderType, finalLotSize, currentPrice, 0, 0, comment);
 
     if(result) {
-        Print("✅ Đã mở lệnh ", direction, " theo AI Imbalance thành công!");
-        Print("   Ticket: ", trade.ResultOrder());
-        Print("   Price: ", currentPrice);
-        Print("   TP: ", takeProfit);
-        if(stopLoss > 0) Print("   SL: ", stopLoss);
+   
 
         // SCALPING: Cập nhật thời gian mở lệnh AI để kích hoạt cooldown
         g_LastAIOrderTime = TimeCurrent();
+
+        // Reset flag sau khi mở lệnh thành công
+        g_AI_OrderPending = false;
 
         // Cập nhật counter
         UpdatePeriodOrderCount();
@@ -5807,11 +5452,11 @@ bool OpenOrderByAIImbalance(double lotSize = 0, string customComment = "") {
         // Cập nhật combined TP nếu cần
         int newOrderCount = totalOrders + 1;
         if(newOrderCount >= CombinedTPLevel) {
-            UpdateCombinedTP(posType, false);
+            // UpdateCombinedTP(posType, false);
         }
     } else {
-        Print("❌ Không thể mở lệnh ", direction, " theo AI Imbalance");
-        Print("   Error Code: ", GetLastError());
+  
+        g_AI_OrderPending = false;
     }
 
     return result;
@@ -5970,12 +5615,15 @@ bool OpenSLRecoveryOrder() {
     
     // Calculate take profit based on weighted average
     double takeProfit = CalculateSLRecoveryTP(recoveryOrderType, currentPrice);
-    
-    // Open the recovery order
+
+    // Calculate SL for recovery order
+    double stopLoss = CalculateAISL(recoveryOrderType, currentPrice);
+
+    // Open the recovery order without TP/SL
     trade.SetExpertMagicNumber(10051990); // Use a special magic number for SL recovery
-    bool result = trade.PositionOpen(_Symbol, recoveryOrderType, recoveryVolume, currentPrice, 0, takeProfit, comment);
+    bool result = trade.PositionOpen(_Symbol, recoveryOrderType, recoveryVolume, currentPrice, 0, 0, comment);
     trade.SetExpertMagicNumber(10051988); // Reset to standard magic
-    
+
     if(result) {
         g_SLRecoveryOrderCount++;
         
@@ -6014,17 +5662,9 @@ double CalculateSLRecoveryVolume() {
 // 7. Calculate TP for SL recovery orders
 double CalculateSLRecoveryTP(ENUM_ORDER_TYPE orderType, double entryPrice) {
     // Use a more aggressive TP for recovery orders
-    double tpPoints = GetPeriodTP() * 0.7; // 70% of normal TP
+    // double tpPoints = GetPeriodTP() // DISABLED: Using virtual TP/SL * 0.7; // 70% of normal TP
     
-    // Calculate TP level
-    double takeProfit;
-    if(orderType == ORDER_TYPE_BUY) {
-        takeProfit = NormalizeDouble(entryPrice + tpPoints * _Point, _Digits);
-    } else {
-        takeProfit = NormalizeDouble(entryPrice - tpPoints * _Point, _Digits);
-    }
-    
-    return takeProfit;
+    return 1;
 }
 
 // 8. Function to handle DCA for SL recovery
@@ -6433,67 +6073,6 @@ bool IsValidTPLevel(double price, double tp, ENUM_POSITION_TYPE posType) {
 
 
 // Modified ModifyOrdersTP to prevent rapid updates
-void ModifyOrdersTP(double currentPrice, ENUM_POSITION_TYPE posType) {
-    // Add cooldown check
-   if(PositionsTotal() == 0) return;
-    
-    static datetime lastUpdate = 0;
-    if(TimeCurrent() - lastUpdate < 60) return;
-    
-    int totalOrders = (posType == POSITION_TYPE_BUY) ? g_TotalOrders_Buy : g_TotalOrders_Sell;
-    bool useCombinedTP = (totalOrders >= CombinedTPLevel);
-    double newTP;
-    
-    if(useCombinedTP) {
-        double weightedSum = 0;
-        double totalVolume = 0;
-        
-        // Calculate weighted average only for non-hedge orders
-        for(int i = PositionsTotal() - 1; i >= 0; i--) {
-            ulong ticket = PositionGetTicket(i);
-            if(!PositionSelectByTicket(ticket)) continue;
-            if(PositionGetString(POSITION_SYMBOL) != _Symbol) continue;
-            if(PositionGetInteger(POSITION_TYPE) != posType) continue;
-            
-            string comment = PositionGetString(POSITION_COMMENT);
-            if(StringFind(comment, "Hedge") >= 0) continue; // Skip hedge orders
-            
-            double volume = PositionGetDouble(POSITION_VOLUME);
-            double openPrice = PositionGetDouble(POSITION_PRICE_OPEN);
-            weightedSum += openPrice * volume;
-            totalVolume += volume;
-        }
-        
-        if(totalVolume > 0) {
-            double avgPrice = NormalizeDouble(weightedSum / totalVolume, _Digits);
-            int tpPoints = GetPeriodTP();
-            newTP = (posType == POSITION_TYPE_BUY) ?
-                    NormalizeDouble(avgPrice + tpPoints * _Point, _Digits) :
-                    NormalizeDouble(avgPrice - tpPoints * _Point, _Digits);
-                    
-            if(IsValidTPLevel(currentPrice, newTP, posType)) {
-                // Update TP only for non-hedge orders
-                for(int i = PositionsTotal() - 1; i >= 0; i--) {
-                    ulong ticket = PositionGetTicket(i);
-                    if(!PositionSelectByTicket(ticket)) continue;
-                    if(PositionGetString(POSITION_SYMBOL) != _Symbol) continue;
-                    if(PositionGetInteger(POSITION_TYPE) != posType) continue;
-
-                    string comment = PositionGetString(POSITION_COMMENT);
-                    if(StringFind(comment, "Hedge") >= 0) continue;
-
-                    // Ch? c?p nh?t n?u TP khác giá tr? hi?n t?i
-                    double currentTP = PositionGetDouble(POSITION_TP);
-                    if(MathAbs(currentTP - newTP) > _Point) {
-                        trade.PositionModify(ticket, 0, newTP);
-                    }
-                }
-                g_LastOrderModification = TimeCurrent();
-                lastUpdate = TimeCurrent();
-            }
-        }
-    }
-}
 
 
 double g_CurrentFirstOrderGap = FirstOrderGap;    // Dynamic gaps that will be adjusted
@@ -6665,11 +6244,9 @@ double GetPeriodExtraDistance() {
 void OpenDCAOrder(double currentPrice, ENUM_POSITION_TYPE posType) {
     // AI-Based DCA Block Check
     if(posType == POSITION_TYPE_BUY && g_AI_BlockDCA_Buy) {
-        Print("🚫 DCA Buy blocked by AI - Wrong market direction");
         return;
     }
     if(posType == POSITION_TYPE_SELL && g_AI_BlockDCA_Sell) {
-        Print("🚫 DCA Sell blocked by AI - Wrong market direction");
         return;
     }
 
@@ -6870,15 +6447,9 @@ void OpenDCAOrderWithHedge(ENUM_ORDER_TYPE orderType, double lotSize, double cur
             }
         }
         
-        double avgPrice = NormalizeDouble(weightedSum / totalVolume, _Digits);
-        int currentTP = GetPeriodTP();
-        
-        takeProfit = (orderType == ORDER_TYPE_BUY) ?
-                    NormalizeDouble(avgPrice + currentTP * _Point, _Digits) :
-                    NormalizeDouble(avgPrice - currentTP * _Point, _Digits);
-                    
+    
         // Open position and update all TPs
-        if(trade.PositionOpen(_Symbol, orderType, lotSize, currentPrice, 0, takeProfit, comment)) {
+        if(trade.PositionOpen(_Symbol, orderType, lotSize, currentPrice, 0, 0, comment)) {
             for(int i = PositionsTotal() - 1; i >= 0; i--) {
                 ulong ticket = PositionGetTicket(i);
                 if(PositionSelectByTicket(ticket) &&
@@ -6887,19 +6458,20 @@ void OpenDCAOrderWithHedge(ENUM_ORDER_TYPE orderType, double lotSize, double cur
                     // Ch? c?p nh?t n?u TP khác giá tr? hi?n t?i
                     double currentTP = PositionGetDouble(POSITION_TP);
                     if(MathAbs(currentTP - takeProfit) > _Point) {
-                        trade.PositionModify(ticket, 0, takeProfit);
+                        double currentSL = PositionGetDouble(POSITION_SL);
+                        trade.PositionModify(ticket, currentSL, takeProfit);
                     }
                 }
             }
         }
     } else {
-        // Individual TP for orders below CombinedTPLevel
-        double tpPoints = GetOrderTP(totalOrders + 1);
-        takeProfit = (orderType == ORDER_TYPE_BUY) ?
-                    NormalizeDouble(currentPrice + tpPoints * _Point, _Digits) :
-                    NormalizeDouble(currentPrice - tpPoints * _Point, _Digits);
-                    
-        trade.PositionOpen(_Symbol, orderType, lotSize, currentPrice, 0, takeProfit, comment);
+        // Individual TP disabled - using virtual TP/SL system
+        // double tpPoints = GetOrderTP(totalOrders + 1); // DISABLED
+        // takeProfit = (orderType == ORDER_TYPE_BUY) ?
+        //             NormalizeDouble(currentPrice + tpPoints * _Point, _Digits) :
+        //             NormalizeDouble(currentPrice - tpPoints * _Point, _Digits);
+
+        trade.PositionOpen(_Symbol, orderType, lotSize, currentPrice, 0, 0, comment);
     }
 }
 
@@ -7304,114 +6876,8 @@ double NormalizeLotSize(double lots) {
 }
 
 
-int GetPeriodTP() {
-    MqlDateTime time_struct;
-    TimeToStruct(TimeCurrent(), time_struct);
-    int currentHour = time_struct.hour;
-    
-    // Check each trading period
-    if(currentHour >= Period1StartHour && currentHour < Period1EndHour) {
-        return Period1TP;
-    }
-    else if(currentHour >= Period2StartHour && currentHour < Period2EndHour) {
-        return Period2TP;
-    }
-    else if(currentHour >= Period3StartHour && currentHour < Period3EndHour) {
-        return Period3TP;
-    }
-    
-    // Outside trading hours - use Period1TP as default
-    return Period1TP;  // Changed from OutsideHoursTP to Period1TP
-}
 
 // Add this new function to handle time-based TP adjustments
-void CheckAndUpdateTimeBasedTP() {
-    static int lastCheckHour = -1;
-    
-    MqlDateTime time_struct;
-    TimeToStruct(TimeCurrent(), time_struct);
-    int currentHour = time_struct.hour;
-    
-    // Only check once per hour
-    if(currentHour == lastCheckHour) return;
-    lastCheckHour = currentHour;
-    
-    // Check if we're entering a new time period
-    bool enteringPeriod1 = (currentHour == Period1StartHour);
-    bool enteringPeriod2 = (currentHour == Period2StartHour);
-    bool enteringPeriod3 = (currentHour == Period3StartHour);
-    
-    if(enteringPeriod1 || enteringPeriod2 || enteringPeriod3) {
-        int newTP;
-        string periodName;
-        
-        // Determine which period we're entering and set appropriate TP
-        if(enteringPeriod1) {
-            newTP = Period1TP;
-            periodName = "Period 1";
-        } else if(enteringPeriod2) {
-            newTP = Period2TP;
-            periodName = "Period 2";
-        } else {
-            newTP = Period3TP;
-            periodName = "Period 3";
-        }
-        
-        
-        // Update TP for both Buy and Sell positions
-        UpdateTPForAllPositions(POSITION_TYPE_BUY, newTP);
-        UpdateTPForAllPositions(POSITION_TYPE_SELL, newTP);
-    }
-}
-
-// Add this new function to update TP for all positions
-void UpdateTPForAllPositions(ENUM_POSITION_TYPE posType, int tpPoints) {
-    if(PositionsTotal() == 0) return;
-    
-    double weightedSum = 0;
-    double totalVolume = 0;
-    
-    // Calculate weighted average price
-    for(int i = PositionsTotal() - 1; i >= 0; i--) {
-        ulong ticket = PositionGetTicket(i);
-        if(PositionSelectByTicket(ticket) && 
-           PositionGetString(POSITION_SYMBOL) == _Symbol &&
-           PositionGetInteger(POSITION_TYPE) == posType) {
-            
-            double volume = PositionGetDouble(POSITION_VOLUME);
-            double openPrice = PositionGetDouble(POSITION_PRICE_OPEN);
-            weightedSum += openPrice * volume;
-            totalVolume += volume;
-        }
-    }
-    
-    if(totalVolume <= 0) return;
-    
-    // Calculate new TP based on weighted average
-    double averagePrice = NormalizeDouble(weightedSum / totalVolume, _Digits);
-    double newTP = (posType == POSITION_TYPE_BUY) ?
-                  NormalizeDouble(averagePrice + tpPoints * _Point, _Digits) :
-                  NormalizeDouble(averagePrice - tpPoints * _Point, _Digits);
-    
-    // Update TP for all positions of this type
-    for(int i = PositionsTotal() - 1; i >= 0; i--) {
-        ulong ticket = PositionGetTicket(i);
-        if(PositionSelectByTicket(ticket) && 
-           PositionGetString(POSITION_SYMBOL) == _Symbol &&
-           PositionGetInteger(POSITION_TYPE) == posType) {
-            
-            double currentPrice = GetCleanPrice();
-            bool validTP = (posType == POSITION_TYPE_BUY) ? 
-                          (newTP > currentPrice) : 
-                          (newTP < currentPrice);
-            
-            if(validTP) {
-                trade.PositionModify(ticket, PositionGetDouble(POSITION_SL), newTP);
-            } else {
-            }
-        }
-    }
-}
 // Add this function to properly close cycles
 
 
@@ -7907,7 +7373,6 @@ ArraySetAsSeries(g_ADX_Buffer, true);
     // Initialize AI Threshold v?i giá tr? m?c ??nh
     g_CurrentAIThreshold = MarketRangeThreshold;
     g_LastThresholdUpdate = 0;
-    Print("🎯 AI Threshold initialized: ", g_CurrentAIThreshold);
 
     return(INIT_SUCCEEDED);
 }
@@ -8384,13 +7849,9 @@ if(!EnforcePeriodOrderLimits()) {
     
     // PRINCIPLE 13: WIDER TAKE PROFIT
     // Use wider TP for recovery orders to ensure they have room to work
-    double standardTP = CalculateOrderTP(recoveryOrderType, entryPrice, 1);
-    double widerTP = (recoveryOrderType == ORDER_TYPE_BUY) ?
-                    entryPrice + (NinthOrderTP  * _Point) :
-                    entryPrice - (NinthOrderTP  * _Point);
-                    
-    double takeProfit = widerTP; // Use the wider TP
-    
+    // double standardTP = CalculateOrderTP( // DISABLEDrecoveryOrderType, entryPrice, 1);
+  
+
     // Order comment
     string comment = StringFormat("Recovery %s #%d", 
                                 EnumToString(recoveryOrderType), 
@@ -8398,7 +7859,7 @@ if(!EnforcePeriodOrderLimits()) {
     
 
     // Open order using standard function
-    if(trade.PositionOpen(_Symbol, recoveryOrderType, volume, entryPrice, 0, takeProfit, comment)) {
+    if(trade.PositionOpen(_Symbol, recoveryOrderType, volume, entryPrice, 0, 0, comment)) {
         g_RecoveryOrderTicket = trade.ResultOrder();
         g_RecoveryAttempts++;
         g_RecoveryOrderOpenTime = TimeCurrent();
@@ -8729,22 +8190,14 @@ double GetVolumeMultiplierAtPrice(double price) {
 }
 
 void HandleParallelDCA(double currentPrice) {
-    // AI-Based DCA Block Check
-    if(g_AI_BlockDCA_Buy || g_AI_BlockDCA_Sell) {
-        Print("🚫 Parallel DCA blocked by AI - Wrong market direction detected");
-        return;
-    }
-
     // Ki?m tra gi?i h?n chu k?
     if(!EnforcePeriodOrderLimits()) {
-        Print("Gi?i h?n l?nh chu k? ?ã ??t - không th? m? l?nh m?i");
         return;
     }
      if(EnablePriceZoneStrategy && HasAnyZoneOrders()) {
         // Skip hedging if zone orders exist
         static datetime lastHedgeSkipLog = 0;
         if(TimeCurrent() - lastHedgeSkipLog > 300) {
-            Print("Skipping hedge check: Zone strategy active with existing orders");
             lastHedgeSkipLog = TimeCurrent();
         }
     }
@@ -8826,20 +8279,24 @@ void HandleParallelDCA(double currentPrice) {
                     double orderDistance = MathAbs(currentPrice - orderPrice) / _Point;
                     
                     if(orderDistance < MinimumOrderDistance) {
-                        Print("Kho?ng cách quá g?n v?i l?nh t?i giá ", orderPrice);
                         allDistancesOK = false;
                         break;
                     }
                 }
                 
                 if(allDistancesOK) {
+                    // Check AI Block trước khi mở Buy DCA
+                    if(g_AI_BlockDCA_Buy) {
+                        return;
+                    }
+
                     // S? d?ng hàm GetNextLotSize cho l?nh ti?p theo
                     double volume = GetNextLotSize(POSITION_TYPE_BUY);
-                    
+
                     // T?o comment cho l?nh Recovery DCA
-                    string comment = StringFormat("Recovery DCA %s #%d", 
+                    string comment = StringFormat("Recovery DCA %s #%d",
                                                "Buy", nextOrderNumber);
-                    
+
                     // S? d?ng OpenOrder ?? m? l?nh Recovery DCA
                     bool result = trade.PositionOpen(_Symbol, ORDER_TYPE_BUY, volume, currentPrice, 0, 0, comment);
                     
@@ -8878,20 +8335,24 @@ void HandleParallelDCA(double currentPrice) {
                     double orderDistance = MathAbs(currentPrice - orderPrice) / _Point;
                     
                     if(orderDistance < MinimumOrderDistance) {
-                        Print("Kho?ng cách quá g?n v?i l?nh t?i giá ", orderPrice);
                         allDistancesOK = false;
                         break;
                     }
                 }
                 
                 if(allDistancesOK) {
+                    // Check AI Block trước khi mở Sell DCA
+                    if(g_AI_BlockDCA_Sell) {
+                        return;
+                    }
+
                     // S? d?ng hàm GetNextLotSize cho l?nh ti?p theo
                     double volume = GetNextLotSize(POSITION_TYPE_SELL);
-                    
+
                     // T?o comment cho l?nh Recovery DCA
-                    string comment = StringFormat("Recovery DCA %s #%d", 
+                    string comment = StringFormat("Recovery DCA %s #%d",
                                                "Sell", nextOrderNumber);
-                    
+
                     // S? d?ng OpenOrder ?? m? l?nh Recovery DCA
                     bool result = trade.PositionOpen(_Symbol, ORDER_TYPE_SELL, volume, currentPrice, 0, 0, comment);
                     
@@ -8909,18 +8370,23 @@ void HandleParallelDCA(double currentPrice) {
     AnalyzeOrderGroups(buyGroup, sellGroup);
     
     // X? lý DCA cho l?nh Buy th??ng
-    if(buyGroup.hasRegularOrders && g_TotalOrders_Buy < MaxOrders) {
+    if(buyGroup.hasRegularOrders && g_TotalOrders_Buy>0) {
         double regularDistance = MathAbs(currentPrice - buyGroup.lastRegularPrice) / _Point;
         double requiredDistance = GetExactDCADistance(buyGroup.regularCount + 1);
         
         if(regularDistance >= requiredDistance && currentPrice < buyGroup.lastRegularPrice) {
             if(CheckMinimumDistanceBetweenOrders(currentPrice, POSITION_TYPE_BUY)) {
+                // Check AI Block trước khi mở Buy DCA
+                if(g_AI_BlockDCA_Buy) {
+                    return;
+                }
+
                 double volume = GetNextLotSize(POSITION_TYPE_BUY);
-                string comment = StringFormat("%s %d || L%d", 
-                                          BuyComment, 
-                                          g_ActiveBuyCycles, 
+                string comment = StringFormat("%s %d || L%d",
+                                          BuyComment,
+                                          g_ActiveBuyCycles,
                                           buyGroup.regularCount + 1);
-                
+
                 if(OpenOrder(ORDER_TYPE_BUY, volume, currentPrice)) {
                 }
             }
@@ -8928,18 +8394,23 @@ void HandleParallelDCA(double currentPrice) {
     }
     
     // X? lý DCA cho l?nh Sell th??ng
-    if(sellGroup.hasRegularOrders && g_TotalOrders_Sell < MaxOrders) {
+    if(sellGroup.hasRegularOrders && g_TotalOrders_Sell > 0) {
         double regularDistance = MathAbs(currentPrice - sellGroup.lastRegularPrice) / _Point;
         double requiredDistance = GetExactDCADistance(sellGroup.regularCount + 1);
         
         if(regularDistance >= requiredDistance && currentPrice > sellGroup.lastRegularPrice) {
             if(CheckMinimumDistanceBetweenOrders(currentPrice, POSITION_TYPE_SELL)) {
+                // Check AI Block trước khi mở Sell DCA
+                if(g_AI_BlockDCA_Sell) {
+                    return;
+                }
+
                 double volume = GetNextLotSize(POSITION_TYPE_SELL);
-                string comment = StringFormat("%s %d || L%d", 
-                                          SellComment, 
-                                          g_ActiveSellCycles, 
+                string comment = StringFormat("%s %d || L%d",
+                                          SellComment,
+                                          g_ActiveSellCycles,
                                           sellGroup.regularCount + 1);
-                
+
                 if(OpenOrder(ORDER_TYPE_SELL, volume, currentPrice)) {
                 }
             }
@@ -9031,13 +8502,10 @@ bool OpenHedgeDCAOrder(ENUM_ORDER_TYPE orderType, double volume, double currentP
     if(totalVolume <= 0) return false;
     
     double avgPrice = NormalizeDouble(weightedSum / totalVolume, _Digits);
-    int tpPoints = GetPeriodTP();
+    // int tpPoints = GetPeriodTP(); // DISABLED: Using virtual TP/SL
     
-    double takeProfit = (orderType == ORDER_TYPE_BUY) ?
-                       NormalizeDouble(avgPrice + tpPoints * _Point, _Digits) :
-                       NormalizeDouble(avgPrice - tpPoints * _Point, _Digits);
-    
-    bool result = trade.PositionOpen(_Symbol, orderType, volume, currentPrice, 0, takeProfit, comment);
+
+    bool result = trade.PositionOpen(_Symbol, orderType, volume, currentPrice, 0, 0, comment);
     
     if(result) {
   
@@ -9241,10 +8709,9 @@ bool OpenTrendOrder(ENUM_ORDER_TYPE orderType) {
     }
     // Skip cooldown and market condition checks - SIMPLIFIED
     g_TrendOrderMutex = true;
-    
+
     double currentPrice = GetCleanPrice();
     double limitPrice;
-    double takeProfit;
     string comment;
     
     bool isNewTrendCycle = (g_TrendOrderCount == 0 || g_LastTrendOrderPrice == 0);
@@ -9254,25 +8721,23 @@ bool OpenTrendOrder(ENUM_ORDER_TYPE orderType) {
     // Calculate based on PRICE ONLY
     if(orderType == ORDER_TYPE_BUY) {
         limitPrice = NormalizeDouble(currentPrice - (99990* _Point), _Digits);
-        takeProfit = NormalizeDouble(limitPrice + g_TrendTP * _Point, _Digits);
         comment = "Trend Follow Buy " + IntegerToString(g_TrendOrderCount);
     } else {
         limitPrice = NormalizeDouble(currentPrice + (99999 * _Point), _Digits);
-        takeProfit = NormalizeDouble(limitPrice - g_TrendTP * _Point, _Digits);
         comment = "Trend Follow Sell " + IntegerToString(g_TrendOrderCount);
     }
-    
-    double lotSize = isNewTrendCycle ? defaultFixLength : 
+
+    double lotSize = isNewTrendCycle ? defaultFixLength :
                     GetNextLotSize((orderType == ORDER_TYPE_BUY) ? POSITION_TYPE_BUY : POSITION_TYPE_SELL);
-    
+
     ENUM_ORDER_TYPE limitOrderType = (orderType == ORDER_TYPE_BUY) ? ORDER_TYPE_BUY_LIMIT : ORDER_TYPE_SELL_LIMIT;
-    
+
     // Final safety check
     if(HasActiveTrendOrder() || HasPendingTrendOrder()) {
         g_TrendOrderMutex = false;
         return false;
     }
-    
+
     bool result = trade.OrderOpen(
         _Symbol,
         limitOrderType,
@@ -9280,7 +8745,7 @@ bool OpenTrendOrder(ENUM_ORDER_TYPE orderType) {
         0,
         limitPrice,
         0,
-        takeProfit,
+        0,
         0,
         0,
         comment
@@ -9376,7 +8841,7 @@ void CheckTrendDCAOpportunity() {
     // Check if we should add a DCA order to the trend
     // THÊM VÀO: C?p nh?t TP g?p n?u ?? s? l?nh
     if(g_TrendOrderCount >= CombinedTPLevel) {
-        UpdateCombinedTP(posType, true); // true = bao g?m l?nh trend
+        // UpdateCombinedTP(posType, true); // true = bao g?m l?nh trend
     }
     
     if(currentDistance >= requiredDistance && validDirection && g_TrendOrderCount < MaxOrders) {
@@ -9417,12 +8882,12 @@ void OpenTrendDCAOrder(ENUM_ORDER_TYPE orderType, double volume, double currentP
                                   g_TrendOrderCount + 1);
                                 
     // Calculate takeProfit using standard logic
-    double takeProfit = CalculateOrderTP(orderType, limitPrice, g_TrendOrderCount + 1);
+    // double takeProfit = CalculateOrderTP( // DISABLEDorderType, limitPrice, g_TrendOrderCount + 1);
     
     // Convert to limit order type
     ENUM_ORDER_TYPE limitOrderType = (orderType == ORDER_TYPE_BUY) ? ORDER_TYPE_BUY_LIMIT : ORDER_TYPE_SELL_LIMIT;
     
-    if(IsValidTPLevel(limitPrice, takeProfit, posType)) {
+    if(IsValidTPLevel(limitPrice,900, posType)) {
         bool result = trade.OrderOpen(
             _Symbol,
             limitOrderType,
@@ -9430,7 +8895,6 @@ void OpenTrendDCAOrder(ENUM_ORDER_TYPE orderType, double volume, double currentP
             0, // Current price not used
             limitPrice,
             0, // No SL
-            takeProfit,
             0, // No expiration
             0, // No expiration time
             comment
@@ -9441,7 +8905,7 @@ void OpenTrendDCAOrder(ENUM_ORDER_TYPE orderType, double volume, double currentP
             g_LastTrendOrderTime = TimeCurrent();
             g_LastTrendOrderPrice = limitPrice;
              if(g_TrendOrderCount >= CombinedTPLevel) {
-        UpdateCombinedTP(posType, true);
+        // UpdateCombinedTP(posType, true);
     }
        
         }
@@ -9966,7 +9430,7 @@ void HandleSidewayBoxTrading(double currentPrice) {
             double tp = boxMid; // TP ở giữa box
             string comment = "Box Sell #1";
             
-            if(trade.PositionOpen(_Symbol, ORDER_TYPE_SELL, lotSize, currentPrice, 0, tp, comment)) {
+            if(trade.PositionOpen(_Symbol, ORDER_TYPE_SELL, lotSize, currentPrice, 0, 0, comment)) {
                 UpdateLastPriceWithVolumeProfile(POSITION_TYPE_SELL, currentPrice);
             }
             return;
@@ -9980,7 +9444,7 @@ void HandleSidewayBoxTrading(double currentPrice) {
             double tp = boxMid; // TP ở giữa box
             string comment = "Box Buy #1";
             
-            if(trade.PositionOpen(_Symbol, ORDER_TYPE_BUY, lotSize, currentPrice, 0, tp, comment)) {
+            if(trade.PositionOpen(_Symbol, ORDER_TYPE_BUY, lotSize, currentPrice, 0, 0, comment)) {
                 UpdateLastPriceWithVolumeProfile(POSITION_TYPE_BUY, currentPrice);
             }
             return;
@@ -10013,7 +9477,7 @@ void HandleSidewayBoxTrading(double currentPrice) {
             double tp = CalculateAveragePriceWithTP(POSITION_TYPE_SELL, currentPrice, lotSize);
             string comment = StringFormat("Box Sell DCA #%d", g_TotalOrders_Sell + 1);
             
-            if(trade.PositionOpen(_Symbol, ORDER_TYPE_SELL, lotSize, currentPrice, 0, tp, comment)) {
+            if(trade.PositionOpen(_Symbol, ORDER_TYPE_SELL, lotSize, currentPrice, 0, 0, comment)) {
                 UpdateLastPriceWithVolumeProfile(POSITION_TYPE_SELL, currentPrice);
             }
         }
@@ -10045,7 +9509,7 @@ void HandleSidewayBoxTrading(double currentPrice) {
             double tp = CalculateAveragePriceWithTP(POSITION_TYPE_BUY, currentPrice, lotSize);
             string comment = StringFormat("Box Buy DCA #%d", g_TotalOrders_Buy + 1);
             
-            if(trade.PositionOpen(_Symbol, ORDER_TYPE_BUY, lotSize, currentPrice, 0, tp, comment)) {
+            if(trade.PositionOpen(_Symbol, ORDER_TYPE_BUY, lotSize, currentPrice, 0, 0, comment)) {
                 UpdateLastPriceWithVolumeProfile(POSITION_TYPE_BUY, currentPrice);
             }
         }
@@ -10236,53 +9700,137 @@ bool g_AI_SL_Active_Sell = false;
 bool g_AI_BlockDCA_Buy = false;
 bool g_AI_BlockDCA_Sell = false;
 
+// Variables để theo dõi số lượng lệnh trước khi cập nhật SL
+int g_LastBuyOrderCount = 0;
+int g_LastSellOrderCount = 0;
+datetime g_LastSLCheckTime = 0;
+
+//+------------------------------------------------------------------+
+//| Hàm kiểm tra và đóng toàn bộ lệnh nếu phát hiện có lệnh bị SL   |
+//| Được gọi TRƯỚC khi cập nhật SL để tránh tình trạng không đồng nhất|
+//+------------------------------------------------------------------+
+void CheckAndCloseAllOnSLHit() {
+    // Chỉ kiểm tra mỗi 1 giây để tránh kiểm tra quá thường xuyên
+    datetime currentTime = TimeCurrent();
+    if(currentTime - g_LastSLCheckTime < 1) return;
+    g_LastSLCheckTime = currentTime;
+
+    // Đếm số lệnh Buy và Sell hiện tại
+    int currentBuyCount = 0;
+    int currentSellCount = 0;
+
+    for(int i = PositionsTotal() - 1; i >= 0; i--) {
+        ulong ticket = PositionGetTicket(i);
+        if(!PositionSelectByTicket(ticket)) continue;
+        if(PositionGetString(POSITION_SYMBOL) != _Symbol) continue;
+
+        ENUM_POSITION_TYPE posType = (ENUM_POSITION_TYPE)PositionGetInteger(POSITION_TYPE);
+        if(posType == POSITION_TYPE_BUY) {
+            currentBuyCount++;
+        } else {
+            currentSellCount++;
+        }
+    }
+
+    // Kiểm tra xem có lệnh Buy nào bị đóng không (giảm số lượng)
+    if(g_LastBuyOrderCount > 0 && currentBuyCount < g_LastBuyOrderCount && currentBuyCount > 0) {
+
+        // Đóng tất cả lệnh Buy còn lại
+        int closedCount = 0;
+        for(int i = PositionsTotal() - 1; i >= 0; i--) {
+            ulong ticket = PositionGetTicket(i);
+            if(!PositionSelectByTicket(ticket)) continue;
+            if(PositionGetString(POSITION_SYMBOL) != _Symbol) continue;
+            if(PositionGetInteger(POSITION_TYPE) != POSITION_TYPE_BUY) continue;
+
+            if(trade.PositionClose(ticket)) {
+                closedCount++;
+            } else {
+            }
+        }
+
+        g_LastBuyOrderCount = 0; // Reset counter
+    }
+
+    // Kiểm tra xem có lệnh Sell nào bị đóng không (giảm số lượng)
+    if(g_LastSellOrderCount > 0 && currentSellCount < g_LastSellOrderCount && currentSellCount > 0) {
+
+        // Đóng tất cả lệnh Sell còn lại
+        int closedCount = 0;
+        for(int i = PositionsTotal() - 1; i >= 0; i--) {
+            ulong ticket = PositionGetTicket(i);
+            if(!PositionSelectByTicket(ticket)) continue;
+            if(PositionGetString(POSITION_SYMBOL) != _Symbol) continue;
+            if(PositionGetInteger(POSITION_TYPE) != POSITION_TYPE_SELL) continue;
+
+            if(trade.PositionClose(ticket)) {
+                closedCount++;
+            } else {
+            }
+        }
+
+        g_LastSellOrderCount = 0; // Reset counter
+    }
+
+    // Cập nhật counters cho lần kiểm tra sau
+    g_LastBuyOrderCount = currentBuyCount;
+    g_LastSellOrderCount = currentSellCount;
+}
+
+//+------------------------------------------------------------------+
+//| Tính SL cho lệnh mới khi mở                                      |
+//| Returns: SL price, hoặc 0 nếu không set SL                       |
+//+------------------------------------------------------------------+
+double CalculateAISL(ENUM_ORDER_TYPE orderType, double openPrice) {
+    if(!EnableAIBasedSL) return 0;
+
+    double marketRange = CalculateMarketRange();
+
+    // Chỉ set SL nếu market có biến động đủ lớn
+    if(marketRange < AI_MarketRangeThreshold) {
+        return 0; // Không set SL nếu range thấp
+    }
+
+    // Tính SL dựa trên AI_SL_Points
+    double slPrice;
+    if(orderType == ORDER_TYPE_BUY) {
+        slPrice = openPrice - (AI_SL_Points * _Point);
+    } else {
+        slPrice = openPrice + (AI_SL_Points * _Point);
+    }
+
+    return NormalizeDouble(slPrice, _Digits);
+}
+
 void AIBasedStopLoss() {
     if(!EnableAIBasedSL) return;
-    if(!g_APIAvailable) return;
 
-    // Lấy imbalance và marketRange từ AI
-    double imbalance = GetAIImbalance();
+    // QUAN TRỌNG: Kiểm tra và đóng toàn bộ lệnh nếu phát hiện có lệnh bị SL
+    // Phải gọi TRƯỚC khi cập nhật SL để tránh tình trạng không đồng nhất
+    CheckAndCloseAllOnSLHit();
+
+    // Lấy marketRange từ AI (hoặc traditional calculation)
     double marketRange = CalculateMarketRange();
 
     // Kiểm tra marketRange có vượt ngưỡng không
     if(marketRange < AI_MarketRangeThreshold) {
-        // Market không đủ biến động, reset flags
-        g_AI_BlockDCA_Buy = false;
-        g_AI_BlockDCA_Sell = false;
+        // Market không đủ biến động, không cập nhật SL
         return;
     }
 
-    // Phân tích hướng thị trường dựa trên imbalance
-    bool marketBullish = (imbalance > 0);
-    bool marketBearish = (imbalance < 0);
-
-    // Kiểm tra lệnh ngược hướng
+    // Kiểm tra có lệnh đang mở không
     bool hasBuyOrders = (g_TotalOrders_Buy > 0);
     bool hasSellOrders = (g_TotalOrders_Sell > 0);
 
-    bool buyOrdersWrongDirection = (marketBearish && hasBuyOrders);
-    bool sellOrdersWrongDirection = (marketBullish && hasSellOrders);
 
-    Print("🤖 AI-Based SL Check:");
-    Print("   Imbalance: ", imbalance, " | MarketRange: ", marketRange);
-    Print("   Buy Orders: ", g_TotalOrders_Buy, " | Sell Orders: ", g_TotalOrders_Sell);
-    Print("   Market Bullish: ", marketBullish, " | Market Bearish: ", marketBearish);
-    Print("   Buy Wrong Direction: ", buyOrdersWrongDirection, " | Sell Wrong Direction: ", sellOrdersWrongDirection);
-
-    // Xử lý Buy orders nếu ngược hướng
-    if(buyOrdersWrongDirection && !g_AI_SL_Active_Buy) {
-        ApplyAIStopLoss(POSITION_TYPE_BUY);
-        g_AI_SL_Active_Buy = true;
-        g_AI_BlockDCA_Buy = AI_BlockDCA_OnWrongDirection;
-        Print("⚠️ Buy orders đang ngược hướng thị trường! Đã đặt SL và chặn DCA BUY");
+    // Cập nhật SL cho TẤT CẢ lệnh Buy đang mở dựa trên marketRange
+    if(hasBuyOrders) {
+        ApplyAIStopLoss(POSITION_TYPE_BUY, marketRange);
     }
 
-    // Xử lý Sell orders nếu ngược hướng
-    if(sellOrdersWrongDirection && !g_AI_SL_Active_Sell) {
-        ApplyAIStopLoss(POSITION_TYPE_SELL);
-        g_AI_SL_Active_Sell = true;
-        g_AI_BlockDCA_Sell = AI_BlockDCA_OnWrongDirection;
-        Print("⚠️ Sell orders đang ngược hướng thị trường! Đã đặt SL và chặn DCA SELL");
+    // Cập nhật SL cho TẤT CẢ lệnh Sell đang mở dựa trên marketRange
+    if(hasSellOrders) {
+        ApplyAIStopLoss(POSITION_TYPE_SELL, marketRange);
     }
 
     // Reset flags nếu không còn lệnh
@@ -10297,8 +9845,57 @@ void AIBasedStopLoss() {
     }
 }
 
-void ApplyAIStopLoss(ENUM_POSITION_TYPE posType) {
-    // Tìm lệnh cuối cùng (mới nhất)
+//+------------------------------------------------------------------+
+//| Update AI Block DCA flags based on Market Range & Imbalance      |
+//| Chặn DCA khi lệnh đang ngược hướng với imbalance                 |
+//+------------------------------------------------------------------+
+void UpdateAIBlockDCA() {
+    if(!EnableAIBasedSL) {
+        return;
+    }
+
+    double marketRange = CalculateMarketRange();
+    double imbalance = 0;
+
+    if(g_APIAvailable) {
+        imbalance = GetAIImbalance();
+    }
+
+    // Nếu marketRange không đạt ngưỡng, bỏ block
+    if(marketRange < AI_MarketRangeThreshold) {
+        g_AI_BlockDCA_Buy = false;
+        g_AI_BlockDCA_Sell = false;
+        return;
+    }
+
+    // Chỉ xét dấu của imbalance
+    bool marketBullish = (imbalance > 0);  // Dấu dương
+    bool marketBearish = (imbalance < 0);  // Dấu âm
+
+    // Block DCA theo hướng ngược lại với market
+    if(marketBearish && AI_BlockDCA_OnWrongDirection) {
+        g_AI_BlockDCA_Buy = true;
+    } else {
+        g_AI_BlockDCA_Buy = false;
+    }
+
+    if(marketBullish && AI_BlockDCA_OnWrongDirection) {
+        g_AI_BlockDCA_Sell = true;
+    } else {
+        g_AI_BlockDCA_Sell = false;
+    }
+
+    // Reset nếu không còn lệnh
+    if(g_TotalOrders_Buy == 0) {
+        g_AI_BlockDCA_Buy = false;
+    }
+    if(g_TotalOrders_Sell == 0) {
+        g_AI_BlockDCA_Sell = false;
+    }
+}
+
+void ApplyAIStopLoss(ENUM_POSITION_TYPE posType, double marketRange) {
+    // Tìm lệnh cuối cùng (mới nhất) để làm reference point
     datetime latestTime = 0;
     double latestPrice = 0;
 
@@ -10317,15 +9914,27 @@ void ApplyAIStopLoss(ENUM_POSITION_TYPE posType) {
 
     if(latestPrice == 0) return;
 
-    // Tính SL từ lệnh cuối cùng
+    // Tính SL dựa trên AI_SL_Points (input parameter cố định)
+    double slDistance = AI_SL_Points * _Point;
     double slPrice;
+
     if(posType == POSITION_TYPE_BUY) {
-        slPrice = latestPrice - (AI_SL_Points * _Point);
+        slPrice = latestPrice - slDistance;
     } else {
-        slPrice = latestPrice + (AI_SL_Points * _Point);
+        slPrice = latestPrice + slDistance;
     }
 
     slPrice = NormalizeDouble(slPrice, _Digits);
+
+    // Đếm số lệnh trước khi bắt đầu cập nhật SL
+    int initialOrderCount = 0;
+    for(int i = PositionsTotal() - 1; i >= 0; i--) {
+        ulong ticket = PositionGetTicket(i);
+        if(!PositionSelectByTicket(ticket)) continue;
+        if(PositionGetString(POSITION_SYMBOL) != _Symbol) continue;
+        if(PositionGetInteger(POSITION_TYPE) != posType) continue;
+        initialOrderCount++;
+    }
 
     // Áp dụng SL cho tất cả lệnh cùng hướng
     int updated = 0;
@@ -10342,12 +9951,213 @@ void ApplyAIStopLoss(ENUM_POSITION_TYPE posType) {
         if(MathAbs(currentSL - slPrice) > _Point || currentSL == 0) {
             if(trade.PositionModify(ticket, slPrice, currentTP)) {
                 updated++;
-                Print("✅ Updated SL for ticket #", ticket, " to ", slPrice);
+
+                // KIỂM TRA QUAN TRỌNG: Sau khi modify, kiểm tra xem có lệnh nào bị đóng không
+                int currentOrderCount = 0;
+                for(int j = PositionsTotal() - 1; j >= 0; j--) {
+                    ulong checkTicket = PositionGetTicket(j);
+                    if(!PositionSelectByTicket(checkTicket)) continue;
+                    if(PositionGetString(POSITION_SYMBOL) != _Symbol) continue;
+                    if(PositionGetInteger(POSITION_TYPE) != posType) continue;
+                    currentOrderCount++;
+                }
+
+                // Nếu số lệnh giảm, có nghĩa là có lệnh bị hit SL
+                if(currentOrderCount < initialOrderCount) {
+        
+                    // Đóng tất cả lệnh còn lại cùng hướng
+                    int closedCount = 0;
+                    for(int k = PositionsTotal() - 1; k >= 0; k--) {
+                        ulong closeTicket = PositionGetTicket(k);
+                        if(!PositionSelectByTicket(closeTicket)) continue;
+                        if(PositionGetString(POSITION_SYMBOL) != _Symbol) continue;
+                        if(PositionGetInteger(POSITION_TYPE) != posType) continue;
+
+                        if(trade.PositionClose(closeTicket)) {
+                            closedCount++;
+                        }
+                    }
+
+
+                    // Reset counter và thoát khỏi hàm
+                    if(posType == POSITION_TYPE_BUY) {
+                        g_LastBuyOrderCount = 0;
+                    } else {
+                        g_LastSellOrderCount = 0;
+                    }
+                    return;
+                }
             }
         }
     }
 
-    Print("📊 AI-Based SL Applied: ", updated, " orders updated with SL at ", slPrice);
+}
+
+// Virtual TP/SL for last order
+double g_VirtualTP_Buy = 0;
+double g_VirtualSL_Buy = 0;
+double g_VirtualTP_Sell = 0;
+double g_VirtualSL_Sell = 0;
+ulong g_LastBuyTicket = 0;
+ulong g_LastSellTicket = 0;
+
+void ManageLastOrderTPSL() {
+    double currentPrice = GetCleanPrice();
+
+    // Calculate average prices for both Buy and Sell orders
+    double totalVolume_Buy = 0;
+    double totalVolume_Sell = 0;
+    double weightedSum_Buy = 0;
+    double weightedSum_Sell = 0;
+    double averagePrice_Buy = 0;
+    double averagePrice_Sell = 0;
+
+    datetime latestTime_Buy = 0;
+    double latestPrice_Buy = 0;
+    ulong latestTicket_Buy = 0;
+
+    datetime latestTime_Sell = 0;
+    double latestPrice_Sell = 0;
+    ulong latestTicket_Sell = 0;
+
+    // Single loop to calculate everything
+    for(int i = PositionsTotal() - 1; i >= 0; i--) {
+        ulong ticket = PositionGetTicket(i);
+        if(!PositionSelectByTicket(ticket)) continue;
+        if(PositionGetString(POSITION_SYMBOL) != _Symbol) continue;
+
+        double volume = PositionGetDouble(POSITION_VOLUME);
+        double openPrice = PositionGetDouble(POSITION_PRICE_OPEN);
+        datetime openTime = (datetime)PositionGetInteger(POSITION_TIME);
+        ENUM_POSITION_TYPE posType = (ENUM_POSITION_TYPE)PositionGetInteger(POSITION_TYPE);
+
+        if(posType == POSITION_TYPE_BUY) {
+            // Calculate weighted average for Buy
+            totalVolume_Buy += volume;
+            weightedSum_Buy += openPrice * volume;
+
+            // Track latest Buy order
+            if(openTime > latestTime_Buy) {
+                latestTime_Buy = openTime;
+                latestPrice_Buy = openPrice;
+                latestTicket_Buy = ticket;
+            }
+        }
+        else if(posType == POSITION_TYPE_SELL) {
+            // Calculate weighted average for Sell
+            totalVolume_Sell += volume;
+            weightedSum_Sell += openPrice * volume;
+
+            // Track latest Sell order
+            if(openTime > latestTime_Sell) {
+                latestTime_Sell = openTime;
+                latestPrice_Sell = openPrice;
+                latestTicket_Sell = ticket;
+            }
+        }
+    }
+
+    // Normalize volumes
+    totalVolume_Buy = NormalizeDouble(totalVolume_Buy, 2);
+    totalVolume_Sell = NormalizeDouble(totalVolume_Sell, 2);
+
+    // Calculate average prices
+    if(totalVolume_Buy > 0) {
+        averagePrice_Buy = NormalizeDouble(weightedSum_Buy / totalVolume_Buy, _Digits);
+    }
+    if(totalVolume_Sell > 0) {
+        averagePrice_Sell = NormalizeDouble(weightedSum_Sell / totalVolume_Sell, _Digits);
+    }
+
+    // Update global average prices
+    g_AveragePrice_Buy = averagePrice_Buy;
+    g_AveragePrice_Sell = averagePrice_Sell;
+
+    // Buy orders management
+    if(g_TotalOrders_Buy > 0 && latestTicket_Buy > 0) {
+        if(latestTicket_Buy != g_LastBuyTicket) {
+            g_LastBuyTicket = latestTicket_Buy;
+            double slDistance = AI_SL_Points * _Point;
+
+            // TP = Average price of all Buy orders + DefaultTP
+            // Đảm bảo TP luôn cao hơn average price
+            if(averagePrice_Buy > 0) {
+                g_VirtualTP_Buy = NormalizeDouble(averagePrice_Buy + DefaultTP * _Point, _Digits);
+            } else {
+                g_VirtualTP_Buy = 0;
+            }
+
+            g_VirtualSL_Buy = EnableAIBasedSL ? NormalizeDouble(latestPrice_Buy - slDistance, _Digits) : 0;
+        }
+    } else {
+        g_VirtualTP_Buy = 0;
+        g_VirtualSL_Buy = 0;
+        g_LastBuyTicket = 0;
+    }
+
+    // Sell orders management
+    if(g_TotalOrders_Sell > 0 && latestTicket_Sell > 0) {
+        if(latestTicket_Sell != g_LastSellTicket) {
+            g_LastSellTicket = latestTicket_Sell;
+            double slDistance = AI_SL_Points * _Point;
+
+            // TP = Average price of all Sell orders - DefaultTP
+            // Đảm bảo TP luôn thấp hơn average price
+            if(averagePrice_Sell > 0) {
+                g_VirtualTP_Sell = NormalizeDouble(averagePrice_Sell - DefaultTP * _Point, _Digits);
+            } else {
+                g_VirtualTP_Sell = 0;
+            }
+
+            g_VirtualSL_Sell = EnableAIBasedSL ? NormalizeDouble(latestPrice_Sell + slDistance, _Digits) : 0;
+        }
+    } else {
+        g_VirtualTP_Sell = 0;
+        g_VirtualSL_Sell = 0;
+        g_LastSellTicket = 0;
+    }
+}
+
+void CheckLastOrderClosed() {
+    double currentPrice = GetCleanPrice();
+
+    // Check Buy TP/SL
+    if(g_TotalOrders_Buy > 0 && g_VirtualTP_Buy > 0) {
+        bool hitTP = currentPrice >= g_VirtualTP_Buy;
+        bool hitSL = (g_VirtualSL_Buy > 0) && (currentPrice <= g_VirtualSL_Buy);
+
+        if(hitTP || hitSL) {
+            for(int i = PositionsTotal() - 1; i >= 0; i--) {
+                ulong ticket = PositionGetTicket(i);
+                if(!PositionSelectByTicket(ticket)) continue;
+                if(PositionGetString(POSITION_SYMBOL) != _Symbol) continue;
+                if(PositionGetInteger(POSITION_TYPE) != POSITION_TYPE_BUY) continue;
+                trade.PositionClose(ticket);
+            }
+            g_VirtualTP_Buy = 0;
+            g_VirtualSL_Buy = 0;
+            g_LastBuyTicket = 0;
+        }
+    }
+
+    // Check Sell TP/SL
+    if(g_TotalOrders_Sell > 0 && g_VirtualTP_Sell > 0) {
+        bool hitTP = currentPrice <= g_VirtualTP_Sell;
+        bool hitSL = (g_VirtualSL_Sell > 0) && (currentPrice >= g_VirtualSL_Sell);
+
+        if(hitTP || hitSL) {
+            for(int i = PositionsTotal() - 1; i >= 0; i--) {
+                ulong ticket = PositionGetTicket(i);
+                if(!PositionSelectByTicket(ticket)) continue;
+                if(PositionGetString(POSITION_SYMBOL) != _Symbol) continue;
+                if(PositionGetInteger(POSITION_TYPE) != POSITION_TYPE_SELL) continue;
+                trade.PositionClose(ticket);
+            }
+            g_VirtualTP_Sell = 0;
+            g_VirtualSL_Sell = 0;
+            g_LastSellTicket = 0;
+        }
+    }
 }
 
 // Reset flags khi đóng hết lệnh
@@ -10386,31 +10196,37 @@ if(g_WaitingForCycleCompletion && g_InsideBox<g_CurrentAIThreshold) {
     
     // Nếu có lệnh sideway nhưng đã outside box → Tiếp tục DCA sideway
     if(activeType == TRADE_SIDEWAY && !g_InsideBox) {
-        ModifyOrdersTPEnhanced(currentPrice);
-        
+        // ModifyOrdersTPEnhanced(currentPrice); // DISABLED
+
         if(g_TotalOrders_Buy > 0 && CheckAnyTPReached(currentPrice, POSITION_TYPE_BUY)) {
             ResetTrendModeTracking();
         }
         if(g_TotalOrders_Sell > 0 && CheckAnyTPReached(currentPrice, POSITION_TYPE_SELL)) {
             ResetTrendModeTracking();
         }
-        
+
     }
-    
+
     // Nếu có lệnh breakout nhưng đã inside box → Tiếp tục DCA breakout
     if(activeType == TRADE_BREAKOUT && g_InsideBox>g_CurrentAIThreshold) {
-        ModifyOrdersTPEnhanced(currentPrice);
+        // ModifyOrdersTPEnhanced(currentPrice); // DISABLED
       if(g_TotalOrders_Buy > 0 && CheckAnyTPReached(currentPrice, POSITION_TYPE_BUY)) {
             ResetTrendModeTracking();
         }
         if(g_TotalOrders_Sell > 0 && CheckAnyTPReached(currentPrice, POSITION_TYPE_SELL)) {
             ResetTrendModeTracking();
         }
-        
+
     }
 }
 // UpdateDynamicSL(); // OLD - DISABLED
-AIBasedStopLoss(); // NEW AI-based SL logic
+// AIBasedStopLoss(); // DISABLED - Chỉ quản lý lệnh cuối cùng
+UpdateAIBlockDCA(); // Cập nhật Block DCA flags dựa trên Range & Imbalance
+
+// NEW: Quản lý TP/SL chỉ cho lệnh cuối cùng
+ManageLastOrderTPSL();
+CheckLastOrderClosed(); // Đóng tất cả nếu lệnh cuối đóng
+
 // Tiếp tục logic bình thường nếu không đang chờ completion
     if(!IsSpreadOK()) return;
     if(!IsAIConnectionOK()) return;  // Check AI connection if required
@@ -10459,14 +10275,12 @@ AIBasedStopLoss(); // NEW AI-based SL logic
         string mode = mr < g_CurrentAIThreshold ? "SIDEWAY (INSIDE BOX)" : "TREND (OUTSIDE BOX)";
         // Print the used market range and its source (do NOT print the input threshold here)
         string msg = StringFormat("OnTick: UsedMarketRange=%.0f Source=%s Mode=%s Symbol=%s Time=%s", mr, source, mode, _Symbol, TimeToString(TimeCurrent(), TIME_DATE|TIME_SECONDS));
-        Print(msg);
     }
     
  
     // =============================================================================
     // 4. TRADING LOGIC DỰA TRÊN BOX
     // =============================================================================
-
 // SCALPING PRIORITY 1: AI Imbalance (Cao nhất - mở lệnh khi có tín hiệu AI mạnh)
 // Chỉ thử mở nếu không có lệnh trong hướng đó (tránh xung đột)
 // SCALPING PRIORITY 1: AI Imbalance (Cao nhất - mở lệnh khi có tín hiệu AI mạnh)
@@ -10476,7 +10290,6 @@ if (g_TotalOrders_Buy == 0 && g_TotalOrders_Sell == 0)
     // Thử mở lệnh bằng chiến thuật AI Imbalance
     if (OpenOrderByAIImbalance())
     {
-        // ✅ AI Imbalance mở lệnh thành công
     }
     else 
     {
@@ -10484,26 +10297,26 @@ if (g_TotalOrders_Buy == 0 && g_TotalOrders_Sell == 0)
         RunFlexibleZoneStrategy();
         
         // Kiểm tra xem có lệnh mới được mở không
-        if (g_TotalOrders_Buy == 0 || g_TotalOrders_Sell == 0)
+        if (g_TotalOrders_Buy == 0 && g_TotalOrders_Sell == 0)
         {
 HandleSingleDirectionEntry();
         }
     }
 }
+           HandleParallelDCA(currentPrice);
 
-HandleParallelDCA(currentPrice);  
-ModifyOrdersTPEnhanced(currentPrice);
+
+// ModifyOrdersTPEnhanced(currentPrice); // DISABLED
   // A. INSIDE BOX → SIDEWAY TRADING
     double marketRange = CalculateMarketRange();
    if(marketRange < g_CurrentAIThreshold && g_TotalOrders_Buy == 0 && g_TotalOrders_Sell == 0) {
     // Narrow range checks (bổ sung cho sideway)
   HandleRegularDCA();
-            CleanupPendingZoneOrders();
     OrderFlowStrength flowStrength = AnalyzeOrderFlowAdvanced();
     if(flowStrength == FLOW_STRONG_SELL && g_TotalOrders_Buy > 0) return;
-    
+
     // Execute sideway trading
-    ModifyOrdersTPEnhanced(currentPrice);
+    // ModifyOrdersTPEnhanced(currentPrice); // DISABLED
     
     if(g_TotalOrders_Buy > 0 && CheckAnyTPReached(currentPrice, POSITION_TYPE_BUY)) {
         ResetTrendModeTracking();
@@ -10530,27 +10343,23 @@ ModifyOrdersTPEnhanced(currentPrice);
          // A. INSIDE BOX → SIDEWAY TRADING
        // A. INSIDE BOX → SIDEWAY TRADING
     double marketRange = CalculateMarketRange();
-    if(marketRange >g_CurrentAIThreshold) {
-    OpenOrderByAIImbalance();
-     HandleZoneBuyDCA(currentPrice);
-     HandleZoneSellDCA(currentPrice);
-        // SCALPING PRIORITY 2: Flexible Zone Strategy (cho trend/breakout)
-       }
+   
         
  
       
-      
-      
-      
-        ModifyOrdersTPEnhanced(currentPrice);
-        
+
+
+
+
+        // ModifyOrdersTPEnhanced(currentPrice); // DISABLED
+
         if(g_TotalOrders_Buy > 0 && CheckAnyTPReached(currentPrice, POSITION_TYPE_BUY)) {
             ResetTrendModeTracking();
         }
         if(g_TotalOrders_Sell > 0 && CheckAnyTPReached(currentPrice, POSITION_TYPE_SELL)) {
             ResetTrendModeTracking();
         }
-        
+
         HandleCycleCompletion();
         
         if(g_TotalOrders_Buy == 0) canOpenNewTrade_Buy = true;
@@ -10631,11 +10440,11 @@ ModifyOrdersTPEnhanced(currentPrice);
     
     
     // =============================================================================
-    // 9. TP MANAGEMENT
+    // 9. TP MANAGEMENT - DISABLED (quản lý ở ManageLastOrderTPSL)
     // =============================================================================
-    
-    ModifyOrdersTPEnhanced(currentPrice);
-    
+
+    // ModifyOrdersTPEnhanced(currentPrice); // DISABLED
+
     if(g_TotalOrders_Buy > 0 && CheckAnyTPReached(currentPrice, POSITION_TYPE_BUY)) {
         ResetTrendModeTracking();
     }
@@ -12162,13 +11971,13 @@ bool PlaceZoneStopOrder(ENUM_ORDER_TYPE orderType, double price, string comment)
     double lotSize = defaultFixLength;
     datetime expiration = TimeCurrent() + (int)(ZoneOrderLifetimeHours * 3600);
     
-    // Tính TP cho lệnh zone
-    double takeProfit = 0;
-    if(orderType == ORDER_TYPE_BUY_STOP) {
-        takeProfit = NormalizeDouble(price + GetPeriodTP() * _Point, _Digits);
-    } else {
-        takeProfit = NormalizeDouble(price - GetPeriodTP() * _Point, _Digits);
-    }
+    // TP disabled - using virtual TP/SL system
+    // double takeProfit = 0;
+    // if(orderType == ORDER_TYPE_BUY_STOP) {
+    //     takeProfit = NormalizeDouble(price + GetPeriodTP() * _Point, _Digits);
+    // } else {
+    //     takeProfit = NormalizeDouble(price - GetPeriodTP() * _Point, _Digits);
+    // }
     
     // Kiểm tra giá hợp lệ
     double currentPrice = GetCleanPrice();
@@ -12184,7 +11993,7 @@ bool PlaceZoneStopOrder(ENUM_ORDER_TYPE orderType, double price, string comment)
         return false;
     }
     
-    return trade.OrderOpen(_Symbol, orderType, lotSize, 0, price, 0, takeProfit, 
+    return trade.OrderOpen(_Symbol, orderType, lotSize, 0, price, 0, 0, 
                           ORDER_TIME_SPECIFIED, expiration, comment);
 }
 
@@ -12232,78 +12041,7 @@ void CleanupPendingZoneOrders() {
 }
 
 // Hàm c?p nh?t TP cho t?t c? l?nh trong m?t chu k?
-void UpdateCombinedTPForZoneCycle(ENUM_POSITION_TYPE posType, int cycleId) {
-    // C?p nh?t thông tin chu k? tr??c
-    int orderCount = 0;
-    double weightedSum = 0;
-    double totalVolume = 0;
-    
-    // ??m l?nh và tính t?ng có tr?ng s?
-    for(int i = PositionsTotal() - 1; i >= 0; i--) {
-        ulong ticket = PositionGetTicket(i);
-        if(!PositionSelectByTicket(ticket)) continue;
-        if(PositionGetString(POSITION_SYMBOL) != _Symbol) continue;
-        if(PositionGetInteger(POSITION_TYPE) != posType) continue;
-        
-        string comment = PositionGetString(POSITION_COMMENT);
-        if(StringFind(comment, "Zone " + IntegerToString(cycleId)) >= 0) {
-            orderCount++;
-            double volume = PositionGetDouble(POSITION_VOLUME);
-            double openPrice = PositionGetDouble(POSITION_PRICE_OPEN);
-            weightedSum += openPrice * volume;
-            totalVolume += volume;
-        }
-    }
-    
-    // Ki?m tra n?u có l?nh và ?? ?i?u ki?n ?? áp d?ng TP chung
-    if(orderCount >= CombinedTPLevel && totalVolume > 0) {
-        // Tính giá trung bình có tr?ng s?
-        double avgPrice = NormalizeDouble(weightedSum / totalVolume, _Digits);
-        
-        // L?y TP hi?n t?i c?a chu k?
-        int tpPoints = GetPeriodTP();
-        
-        // Tính TP m?i
-        double newTP;
-        if(posType == POSITION_TYPE_BUY) {
-            newTP = NormalizeDouble(avgPrice + tpPoints * _Point, _Digits);
-        } else {
-            newTP = NormalizeDouble(avgPrice - tpPoints * _Point, _Digits);
-        }
-        
-        // Ki?m tra TP h?p l?
-        double currentPrice = GetCleanPrice();
-        if(!IsValidTPLevel(currentPrice, newTP, posType)) {
-            return;
-        }
-        
-        // C?p nh?t TP cho t?t c? l?nh trong chu k?
-        int updatedCount = 0;
-        for(int i = PositionsTotal() - 1; i >= 0; i--) {
-            ulong ticket = PositionGetTicket(i);
-            if(!PositionSelectByTicket(ticket)) continue;
-            if(PositionGetString(POSITION_SYMBOL) != _Symbol) continue;
-            if(PositionGetInteger(POSITION_TYPE) != posType) continue;
-            
-            string comment = PositionGetString(POSITION_COMMENT);
-            if(StringFind(comment, "Zone " + IntegerToString(cycleId)) >= 0) {
-                // Ch? c?p nh?t n?u TP khác giá tr? hi?n t?i
-                double currentTP = PositionGetDouble(POSITION_TP);
-                if(MathAbs(currentTP - newTP) > _Point) {
-                    if(trade.PositionModify(ticket, 0, newTP)) {
-                        updatedCount++;
-                    }
-                }
-            }
-        }
-        
-        if(updatedCount > 0) {
-        
-        }
-    } else {
-              
-    }
-}int g_CurrentRecoveryCycleId = 0;  // Track recovery cycle ID// Function to properly handle hedge cycle completion
+int g_CurrentRecoveryCycleId = 0;  // Track recovery cycle ID// Function to properly handle hedge cycle completion
 void HandleHedgeCycleCompletion() {
     if(!g_InHedgeCycle) return;
     
@@ -12709,7 +12447,6 @@ void CleanupConflictingOrders() {
     }
     
     if(hasConflict) {
-    HandleRegularDCA();
     }
     return;
 
@@ -12887,7 +12624,6 @@ bool RunFlexibleZoneStrategy() {
     switch(g_CurrentMode) {
        case MODE_NORMAL:
        ManageFlexibleZoneStrategy();
-CleanupPendingZoneOrders();
             break;
             
             
@@ -12904,7 +12640,6 @@ CleanupPendingZoneOrders();
                 if(canTradeBuyZone || canTradeSellZone) {
            ManagePriceZoneStrategy();
 ManageZoneDCA();
-CleanupPendingZoneOrders();
               
                 }
             }
@@ -12931,7 +12666,6 @@ CleanupPendingZoneOrders();
             }
             
  
-   CleanupPendingZoneOrders();
 
           break;
         }
@@ -13064,7 +12798,6 @@ void HandleRegularDCA() {
 
     // AI-Based DCA Block Check
     if(g_AI_BlockDCA_Buy || g_AI_BlockDCA_Sell) {
-        Print("🚫 Regular DCA blocked by AI - Wrong market direction detected");
         return;
     }
 
@@ -13077,7 +12810,8 @@ void HandleRegularDCA() {
     
     double distanceFromCenter = MathAbs(currentPrice - centerPrice) / _Point;
     if(distanceFromCenter < 200) return;
-    
+  if (g_TotalOrders_Buy == 0 && g_TotalOrders_Sell == 0)
+{  
     // BUY LOGIC
     if(currentPrice < centerPrice && EnableBuyOrders) {
         if(g_TotalOrders_Buy >= 20) return;
@@ -13110,7 +12844,7 @@ void HandleRegularDCA() {
             double tp = centerPrice + (100 * _Point);
             string comment = StringFormat("Regular Buy #%d", g_TotalOrders_Buy + 1);
             
-            if(trade.PositionOpen(_Symbol, ORDER_TYPE_BUY, lotSize, currentPrice, 0, tp, comment)) {
+            if(trade.PositionOpen(_Symbol, ORDER_TYPE_BUY, lotSize, currentPrice, 0, 0, comment)) {
                 // CẬP NHẬT NGAY LẬP TỨC
                 g_LastBuyPrice = currentPrice;
                 g_LastBuyOrderTime = TimeCurrent();
@@ -13150,13 +12884,14 @@ void HandleRegularDCA() {
             double tp = centerPrice - (100 * _Point);
             string comment = StringFormat("Regular Sell #%d", g_TotalOrders_Sell + 1);
             
-            if(trade.PositionOpen(_Symbol, ORDER_TYPE_SELL, lotSize, currentPrice, 0, tp, comment)) {
+            if(trade.PositionOpen(_Symbol, ORDER_TYPE_SELL, lotSize, currentPrice, 0, 0, comment)) {
                 g_LastSellPrice = currentPrice;
                 g_LastSellOrderTime = TimeCurrent();
                 UpdateLastPriceWithVolumeProfile(POSITION_TYPE_SELL, currentPrice);
                 UpdatePeriodOrderCount();
             }
         }
+    }
     }
 }
 
@@ -13247,9 +12982,17 @@ void UpdateOrderCounters(ENUM_POSITION_TYPE posType) {
 
 // Hàm mở lệnh DCA thường với logic center price riêng
 void OpenRegularDCAOrder(double currentPrice, ENUM_POSITION_TYPE posType) {
+    // Check AI Block
+    if(posType == POSITION_TYPE_BUY && g_AI_BlockDCA_Buy) {
+        return;
+    }
+    if(posType == POSITION_TYPE_SELL && g_AI_BlockDCA_Sell) {
+        return;
+    }
+
     double centerPrice = CalculateRegularDCACenterPrice();
     if(centerPrice == 0) return;
-    
+
     // Kiểm tra điều kiện center price
     bool validDirection = false;
     if(posType == POSITION_TYPE_BUY && currentPrice < centerPrice) {
@@ -13257,7 +13000,7 @@ void OpenRegularDCAOrder(double currentPrice, ENUM_POSITION_TYPE posType) {
     } else if(posType == POSITION_TYPE_SELL && currentPrice > centerPrice) {
         validDirection = true;
     }
-    
+
     if(!validDirection) return;
     
     // Logic mở lệnh như cũ
@@ -13292,20 +13035,20 @@ void CheckAndOpenFirstOrders(double currentPrice) {
     // Mở Buy nếu giá < tâm giá
     if(currentPrice < centerPrice && EnableBuyOrders) {
         double volume = defaultFixLength;
-        double takeProfit = CalculateOrderTP(ORDER_TYPE_BUY, currentPrice, 1);
+        // double takeProfit = CalculateOrderTP( // DISABLEDORDER_TYPE_BUY, currentPrice, 1);
         string comment = StringFormat("%s #1", BuyComment);
         
-        if(trade.PositionOpen(_Symbol, ORDER_TYPE_BUY, volume, currentPrice, 0, takeProfit, comment)) {
+        if(trade.PositionOpen(_Symbol, ORDER_TYPE_BUY, volume, currentPrice, 0, 0, comment)) {
             UpdatePeriodOrderCount();
         }
     }
     // Mở Sell nếu giá > tâm giá
     else if(currentPrice > centerPrice && EnableSellOrders) {
         double volume = defaultFixLength;
-        double takeProfit = CalculateOrderTP(ORDER_TYPE_SELL, currentPrice, 1);
+        // double takeProfit = CalculateOrderTP( // DISABLEDORDER_TYPE_SELL, currentPrice, 1);
         string comment = StringFormat("%s #1", SellComment);
         
-        if(trade.PositionOpen(_Symbol, ORDER_TYPE_SELL, volume, currentPrice, 0, takeProfit, comment)) {
+        if(trade.PositionOpen(_Symbol, ORDER_TYPE_SELL, volume, currentPrice, 0, 0, comment)) {
             UpdatePeriodOrderCount();
         }
     }
@@ -13590,10 +13333,10 @@ void HandleSingleDirectionEntry() {
             }
             
             double lotSize = GetNextLotSize(POSITION_TYPE_BUY);
-            double tp = CalculateOrderTP(ORDER_TYPE_BUY, currentPrice, g_TotalOrders_Buy + 1);
+            // double tp = CalculateOrderTP( // DISABLEDORDER_TYPE_BUY, currentPrice, g_TotalOrders_Buy + 1);
             string comment = StringFormat("SB#%d-%s", g_TotalOrders_Buy + 1, entryReason);
             
-            if(trade.PositionOpen(_Symbol, ORDER_TYPE_BUY, lotSize, currentPrice, 0, tp, comment)) {
+            if(trade.PositionOpen(_Symbol, ORDER_TYPE_BUY, lotSize, currentPrice, 0, 0, comment)) {
                 g_LastBuyPrice = currentPrice;
                 UpdatePeriodOrderCount();
             } else {
@@ -13661,11 +13404,11 @@ void HandleSingleDirectionEntry() {
             }
             
             double lotSize = GetNextLotSize(POSITION_TYPE_SELL);
-            double tp = CalculateOrderTP(ORDER_TYPE_SELL, currentPrice, g_TotalOrders_Sell + 1);
+            // double tp = CalculateOrderTP( // DISABLEDORDER_TYPE_SELL, currentPrice, g_TotalOrders_Sell + 1);
             string comment = StringFormat("SS#%d-%s", g_TotalOrders_Sell + 1, entryReason);
             
             
-            if(trade.PositionOpen(_Symbol, ORDER_TYPE_SELL, lotSize, currentPrice, 0, tp, comment)) {
+            if(trade.PositionOpen(_Symbol, ORDER_TYPE_SELL, lotSize, currentPrice, 0, 0, comment)) {
                 g_LastSellPrice = currentPrice;
                 UpdatePeriodOrderCount();
             } else {
@@ -13752,11 +13495,11 @@ void HandleSingleDirectionEntry2() {
             }
             
             double lotSize = GetNextLotSize(POSITION_TYPE_SELL);
-            double tp = CalculateOrderTP(ORDER_TYPE_SELL, currentPrice, g_TotalOrders_Buy + 1);
+            // double tp = CalculateOrderTP( // DISABLEDORDER_TYPE_SELL, currentPrice, g_TotalOrders_Buy + 1);
             string comment = StringFormat("SB#%d-%s", g_TotalOrders_Buy + 1, entryReason);
             
             
-            if(trade.PositionOpen(_Symbol, ORDER_TYPE_SELL, lotSize, currentPrice, 0, tp, comment)) {
+            if(trade.PositionOpen(_Symbol, ORDER_TYPE_SELL, lotSize, currentPrice, 0, 0, comment)) {
                 g_LastBuyPrice = currentPrice;
                 UpdatePeriodOrderCount();
             } else {
@@ -13822,11 +13565,11 @@ void HandleSingleDirectionEntry2() {
             }
             
             double lotSize = GetNextLotSize(POSITION_TYPE_BUY);
-            double tp = CalculateOrderTP(ORDER_TYPE_BUY, currentPrice, g_TotalOrders_Sell + 1);
+            // double tp = CalculateOrderTP( // DISABLEDORDER_TYPE_BUY, currentPrice, g_TotalOrders_Sell + 1);
             string comment = StringFormat("SS#%d-%s", g_TotalOrders_Sell + 1, entryReason);
             
             
-            if(trade.PositionOpen(_Symbol, ORDER_TYPE_BUY, lotSize, currentPrice, 0, tp, comment)) {
+            if(trade.PositionOpen(_Symbol, ORDER_TYPE_BUY, lotSize, currentPrice, 0, 0, comment)) {
                 g_LastSellPrice = currentPrice;
                 UpdatePeriodOrderCount();
             } else {
@@ -14019,7 +13762,7 @@ void HandleBuyDCA(double currentPrice, string orderPrefix = "Buy") {
         string comment = StringFormat("%s #1", orderPrefix);
         
         
-        if(trade.PositionOpen(_Symbol, ORDER_TYPE_BUY, lotSize, currentPrice, 0, tp, comment)) {
+        if(trade.PositionOpen(_Symbol, ORDER_TYPE_BUY, lotSize, currentPrice, 0, 0, comment)) {
             UpdateLastPriceWithVolumeProfile(POSITION_TYPE_BUY, currentPrice);
             canOpenNewTrade_Buy = false;
         } else {
@@ -14060,7 +13803,7 @@ void HandleBuyDCA(double currentPrice, string orderPrefix = "Buy") {
         string comment = StringFormat("%s #%d", orderPrefix, g_TotalOrders_Buy + 1);
         
         
-        if(trade.PositionOpen(_Symbol, ORDER_TYPE_BUY, lotSize, currentPrice, 0, tp, comment)) {
+        if(trade.PositionOpen(_Symbol, ORDER_TYPE_BUY, lotSize, currentPrice, 0, 0, comment)) {
             UpdateLastPriceWithVolumeProfile(POSITION_TYPE_BUY, currentPrice);
         } else {
         }
@@ -14091,7 +13834,7 @@ void HandleSellDCA(double currentPrice, string orderPrefix = "Sell") {
         string comment = StringFormat("%s #1", orderPrefix);
         
         
-        if(trade.PositionOpen(_Symbol, ORDER_TYPE_SELL, lotSize, currentPrice, 0, tp, comment)) {
+        if(trade.PositionOpen(_Symbol, ORDER_TYPE_SELL, lotSize, currentPrice, 0, 0, comment)) {
             UpdateLastPriceWithVolumeProfile(POSITION_TYPE_SELL, currentPrice);
             canOpenNewTrade_Sell = false;
         } else {
@@ -14132,7 +13875,7 @@ void HandleSellDCA(double currentPrice, string orderPrefix = "Sell") {
         string comment = StringFormat("%s #%d", orderPrefix, g_TotalOrders_Sell + 1);
         
         
-        if(trade.PositionOpen(_Symbol, ORDER_TYPE_SELL, lotSize, currentPrice, 0, tp, comment)) {
+        if(trade.PositionOpen(_Symbol, ORDER_TYPE_SELL, lotSize, currentPrice, 0, 0, comment)) {
             UpdateLastPriceWithVolumeProfile(POSITION_TYPE_SELL, currentPrice);
         } else {
         }

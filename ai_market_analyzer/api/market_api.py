@@ -2,6 +2,11 @@
 FastAPI REST API cho Market Range Predictor
 Cung cấp endpoints để EA có thể lấy dữ liệu market range từ AI
 """
+import sys
+import os
+# Fix import path khi chạy trực tiếp từ api folder
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
+
 from fastapi import FastAPI, HTTPException, BackgroundTasks
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
@@ -12,9 +17,23 @@ import asyncio
 from loguru import logger
 
 from models.market_range_predictor import MarketRangePredictor
-# Use SimpleCollector (REST-based) instead of WebSocket collector
-# WebSocket has event loop issues in some environments
-from data.simple_collector import SimpleCollector as BinanceOrderFlowCollector
+
+# Choose collector based on environment variable
+# WebSocketCollector is preferred (no rate limits)
+# SimpleCollector is fallback (with rate limiting)
+USE_WEBSOCKET = os.getenv('USE_WEBSOCKET', 'true').lower() == 'true'
+
+if USE_WEBSOCKET:
+    try:
+        from data.websocket_collector import WebSocketCollector as BinanceOrderFlowCollector
+        logger.info("✅ Using WebSocketCollector (no rate limits)")
+    except Exception as e:
+        logger.warning(f"Failed to import WebSocketCollector: {e}, falling back to SimpleCollector")
+        from data.simple_collector import SimpleCollector as BinanceOrderFlowCollector
+else:
+    from data.simple_collector import SimpleCollector as BinanceOrderFlowCollector
+    logger.info("ℹ️ Using SimpleCollector (with rate limiting)")
+
 from config.config import API_HOST, API_PORT, SYMBOL
 
 # Initialize FastAPI app
@@ -35,7 +54,15 @@ app.add_middleware(
 
 # Global instances
 predictor = MarketRangePredictor()
-collector = BinanceOrderFlowCollector()
+
+# Initialize collector
+# If using SimpleCollector, set longer update interval to avoid rate limits
+if USE_WEBSOCKET:
+    collector = BinanceOrderFlowCollector()  # WebSocket doesn't need update_interval
+else:
+    # Tăng lên 20 giây để chắc chắn tránh rate limit
+    # 3 API calls x 3 requests/min = 9 requests/min (rất an toàn)
+    collector = BinanceOrderFlowCollector(update_interval=20)
 
 # State
 app.state.is_collecting = False
@@ -150,7 +177,10 @@ async def prediction_loop():
             else:
                 logger.warning(f"⚠️ Iteration #{update_count}: No metrics available yet")
 
-            await asyncio.sleep(1)  # Update every second
+            # Update every 10 seconds to reduce API calls and avoid rate limits
+            # SimpleCollector has internal rate limiting (20s interval)
+            # WebSocketCollector updates real-time, không ảnh hưởng bởi sleep
+            await asyncio.sleep(1)
 
         except Exception as e:
             logger.error(f"❌ Error in prediction loop (iteration #{update_count}): {e}")
@@ -161,21 +191,62 @@ async def prediction_loop():
 
 def calculate_market_range_from_metrics(metrics: Dict) -> float:
     """
-    Market Range CHỈ từ Imbalance - KHÔNG thêm bớt
-    Công thức: 10000 + (|imbalance| × 15000)
+    Market Range - HYBRID LOGIC
+    Kết hợp volume imbalance (stable base) + volatility adjustment (responsive)
+
+    Phù hợp với PAXGUSDT trading thực tế!
     """
 
-    # Volume Imbalance từ thị trường (-1 to +1)
-    volume_imbalance = metrics.get('volume_imbalance', 0)
-    imb_abs = abs(volume_imbalance)
+    # 1. VOLUME METRICS - Base stable từ volume (như logic cũ)
+    volume_imbalance = metrics.get('volume_imbalance', 0)  # -1 to +1
+    large_trades_ratio = metrics.get('large_trades_ratio', 0)  # 0 to 1
 
-    # Market Range TRỰC TIẾP từ imbalance
-    market_range = (imb_abs * 15000)
+    # 2. PRICE VOLATILITY - Điều chỉnh responsive
+    price_range = metrics.get('price_range', 0)  # High - Low
+    price_range_pct = metrics.get('price_range_pct', 0)  # % movement (primary indicator)
 
-    # Safety clamp
-    market_range = max(1, min(market_range, 30000))
+    # 3. TRADE ACTIVITY
+    trade_intensity = metrics.get('trade_intensity', 0)  # trades/sec
 
-    logger.info(f"🎯 Range: {market_range:.0f} | imb={volume_imbalance:+.3f}")
+    # 4. BASE RANGE từ volume imbalance (10000 baseline phù hợp EA)
+    # Volume imbalance 0 → 10000 points
+    # Volume imbalance 1 → 25000 points
+    base_range = (abs(volume_imbalance) * 15000)
+
+    # 5. VOLATILITY ADJUSTMENT (0.5 - 2.0x)
+    # Dùng price_range_pct (%) thay vì absolute để responsive hơn
+    # PAXGUSDT: 0.1% movement = low volatility
+    #           0.5% movement = high volatility
+    if price_range_pct > 0:
+        # Scale: 0.1% → x0.8, 0.3% → x1.2, 0.5%+ → x1.5
+        volatility_mult = 0.8 + (price_range_pct * 2.0)
+        volatility_mult = max(0.5, min(volatility_mult, 2.0))
+    else:
+        volatility_mult = 1.0
+
+    # 6. LARGE TRADES ADJUSTMENT (1.0 - 1.4x)
+    large_trades_mult = 1.0 + (large_trades_ratio * 0.4)
+
+    # 7. TRADE INTENSITY ADJUSTMENT (0.8 - 1.3x)
+    # Ít trades → giảm range, nhiều trades → tăng range
+    if trade_intensity < 1.0:
+        intensity_mult = 0.8 + (trade_intensity * 0.2)
+    else:
+        intensity_mult = 1.0 + min(trade_intensity / 10.0, 0.3)
+
+    # 8. TÍNH MARKET RANGE CUỐI CÙNG
+    market_range = base_range * volatility_mult * large_trades_mult * intensity_mult
+
+    # 9. SAFETY CLAMP (5000 - 35000 phù hợp với EA)
+    market_range = max(1, min(market_range, 35000))
+
+    # 10. LOG chi tiết để debug
+    logger.info(f"🎯 Market Range Calculation:")
+    logger.info(f"   Volume Imb: {volume_imbalance:+.3f} → Base: {base_range:.0f}")
+    logger.info(f"   Price Range: {price_range:.2f} ({price_range_pct:.4f}%) → x{volatility_mult:.2f}")
+    logger.info(f"   Large Trades: {large_trades_ratio:.2f} → x{large_trades_mult:.2f}")
+    logger.info(f"   Intensity: {trade_intensity:.2f} trades/s → x{intensity_mult:.2f}")
+    logger.info(f"   → FINAL RANGE: {market_range:.0f} points")
 
     return market_range
 

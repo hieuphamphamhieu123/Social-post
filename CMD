@@ -1,0 +1,3 @@
+venv\Scripts\activate
+cd ai_market_analyzer
+python main.py api

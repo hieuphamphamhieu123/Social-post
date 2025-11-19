@@ -42,10 +42,6 @@ double CalculateMarketRangeWithAI()
     // Log lần đầu tiên hàm được gọi
     if(firstCall)
     {
-        Print("🚀 CalculateMarketRangeWithAI() called for the first time!");
-        Print("   g_USE_AI_PREDICTION: ", g_USE_AI_PREDICTION);
-        Print("   g_APIAvailable: ", g_APIAvailable);
-        Print("   IsRunningInTester: ", IsRunningInTester());
         firstCall = false;
     }
 
@@ -55,7 +51,7 @@ double CalculateMarketRangeWithAI()
     bool usedAI = false;
 
     // 1. Thử lấy từ AI nếu enabled (AI helper itself caches using g_AI_UPDATE_INTERVAL)
-    if(g_USE_AI_PREDICTION && g_APIAvailable && !IsRunningInTester())
+    if(g_USE_AI_PREDICTION && g_APIAvailable )
     {
         double aiRange = GetAIMarketRange();
 
@@ -83,13 +79,9 @@ double CalculateMarketRangeWithAI()
     {
         if(usedAI)
         {
-            Print("✅ AI Market Range: ", finalRange, " (Updated every ", g_AI_UPDATE_INTERVAL, "s)");
-            Print("   API Status: Online");
         }
         else
         {
-            Print("⚠️ Using Traditional Market Range: ", finalRange);
-            Print("   API Status: ", (g_APIAvailable ? "Online" : "Offline"));
         }
         lastLogTime = TimeCurrent();
     }
@@ -142,7 +134,6 @@ double GetAIMarketRange()
     // If called multiple times in same second, return same value to avoid spam
     if(currentSecond == lastSecond && lastValueInSecond > 0)
     {
-        Print("⚡ Returning same-second cached value: ", lastValueInSecond);
         return lastValueInSecond;
     }
 
@@ -151,7 +142,7 @@ double GetAIMarketRange()
     char post[], result[];
     string result_headers;
 
-    Print("🔄 [", TimeToString(TimeCurrent(), TIME_DATE|TIME_SECONDS), "] Calling AI API: ", url);
+
 
     int res = WebRequest(
         "GET",
@@ -163,12 +154,10 @@ double GetAIMarketRange()
         result_headers
     );
 
-    Print("📡 API Response Code: ", res);
 
     if(res == 200)
     {
         string json_string = CharArrayToString(result);
-        Print("📦 JSON Response: ", json_string);
 
         double market_range = ParseMarketRangeFromJSON(json_string);
 
@@ -179,19 +168,16 @@ double GetAIMarketRange()
             g_APIAvailable = true;
             lastSecond = currentSecond;
             lastValueInSecond = market_range;
-            Print("✅ [FRESH] AI Market Range Retrieved: ", market_range, " at ", TimeToString(TimeCurrent(), TIME_SECONDS));
             return market_range;
         }
     }
     else
     {
         g_APIAvailable = false;
-        Print("❌ API Call Failed - Code: ", res);
 
         // Only use old cache as last resort
         if(g_LastAIMarketRange > 0)
         {
-            Print("⚠️ API failed, using last known value: ", g_LastAIMarketRange);
             return g_LastAIMarketRange;
         }
     }
@@ -211,21 +197,10 @@ bool InitAIIntegration()
     //   http://localhost:8000
     // (Use IP address instead of 'localhost' for better MT5 compatibility)
 
-    Print("========================================");
-    Print("🤖 Initializing AI Integration...");
-    Print("API URL: ", g_API_URL);
-    Print("Imbalance Endpoint: ", g_API_URL + "/orderflow/metrics");
-    Print("Current Symbol: ", _Symbol);
-    Print("========================================");
-
     // Warning về correlation
     if(StringFind(_Symbol, "XAU") >= 0 || StringFind(_Symbol, "GOLD") >= 0 || StringFind(_Symbol, "GC") >= 0)
     {
-        Print("⚠️⚠️⚠️ CORRELATION WARNING ⚠️⚠️⚠️");
-        Print("Trading ", _Symbol, " but using PAXG/USDT orderflow data!");
-        Print("PAXG and ", _Symbol, " have correlation but NOT identical!");
-        Print("Use for REFERENCE only, not production trading!");
-        Print("========================================");
+      
     }
 
     // Test connection
@@ -247,20 +222,16 @@ bool InitAIIntegration()
     if(res == 200)
     {
         g_APIAvailable = true;
-        Print("AI API connected successfully!");
         return true;
     }
     else if(res == -1)
     {
-        Print("ERROR: WebRequest not enabled or URL not in allowed list!");
-        Print("Please add '", g_API_URL, "' to allowed URLs in MT5 settings");
+       
         g_APIAvailable = false;
         return false;
     }
     else
     {
-        Print("WARNING: Cannot connect to AI API (error code: ", res, ")");
-        Print("Make sure Python API is running at: ", g_API_URL);
         g_APIAvailable = false;
         return false;
     }
@@ -298,7 +269,6 @@ double CalculateTraditionalMarketRange();
 //+------------------------------------------------------------------+
 double ParseImbalanceFromJSON(string json_string)
 {
-    Print("🔍 [DEBUG] Parsing Imbalance from JSON: ", json_string);
 
     // Danh sách các key có thể có (ưu tiên volume_imbalance trước)
     string keys[] = {"volume_imbalance", "order_book_imbalance", "imbalance", "order_imbalance", "order_flow_imbalance", "net_imbalance", "buy_sell_imbalance"};
@@ -314,7 +284,6 @@ double ParseImbalanceFromJSON(string json_string)
         if(start >= 0)
         {
             keyLength = StringLen(searchKey);
-            Print("🔍 [DEBUG] Found key: ", keys[i]);
             break;
         }
     }
@@ -322,7 +291,6 @@ double ParseImbalanceFromJSON(string json_string)
     // Nếu không tìm thấy key nào
     if(start < 0)
     {
-        Print("❌ [DEBUG] No imbalance key found in JSON");
         return 0;
     }
 
@@ -355,7 +323,6 @@ double ParseImbalanceFromJSON(string json_string)
 
     double result = StringToDouble(value_str);
 
-    Print("🔍 [DEBUG] Parsed value_str: '", value_str, "' → double: ", result);
 
     return result;
 }
@@ -383,7 +350,6 @@ double GetAIImbalance()
     char post[], result[];
     string result_headers;
 
-    Print("🔄 [", TimeToString(TimeCurrent(), TIME_DATE|TIME_SECONDS), "] Getting AI Imbalance from: ", url);
 
     int res = WebRequest(
         "GET",
@@ -398,7 +364,6 @@ double GetAIImbalance()
     if(res == 200)
     {
         string json_string = CharArrayToString(result);
-        Print("📦 JSON Response for Imbalance: ", json_string);
 
         double imbalance = ParseImbalanceFromJSON(json_string);
 
@@ -408,18 +373,15 @@ double GetAIImbalance()
         lastSecond = currentSecond;
         lastValueInSecond = imbalance;
 
-        Print("✅ AI Imbalance Retrieved: ", imbalance, " at ", TimeToString(TimeCurrent(), TIME_SECONDS));
         return imbalance;
     }
     else
     {
         g_APIAvailable = false;
-        Print("❌ API Call Failed for Imbalance - Code: ", res);
 
         // Sử dụng giá trị cũ nếu có
         if(g_LastImbalanceUpdate > 0 && TimeCurrent() - g_LastImbalanceUpdate < 300) // 5 phút
         {
-            Print("⚠️ API failed, using last known imbalance: ", g_LastAIImbalance);
             return g_LastAIImbalance;
         }
     }
