@@ -10292,10 +10292,9 @@ CheckLastOrderClosed(); // Đóng tất cả nếu lệnh cuối đóng
     }
     
               if(g_InsideBox > g_CurrentAIThreshold ) {
-              if (g_TotalOrders_Buy == 0 && g_TotalOrders_Sell == 0)
-{
+          
 RunFlexibleZoneStrategy();
-}
+
                  CloseAllPositionsEarly(10,100);
 
               return;
