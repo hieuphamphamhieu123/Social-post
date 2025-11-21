@@ -271,7 +271,7 @@ const int MIN_ORDER_MOD_INTERVAL = 5; // 5 seconds minimum between modifications
 datetime g_LastAIOrderTime = 0;
 bool g_AI_OrderPending = false; // Flag để ngăn mở trùng lặp trong cùng 1 tick
 const int AI_ORDER_COOLDOWN = 1; // 60 seconds cooldown between AI imbalance orders
-const double AI_MIN_IMBALANCE_THRESHOLD = 0.01; // Minimum imbalance strength (15% imbalance on -1 to +1 scale)
+const double AI_MIN_IMBALANCE_THRESHOLD = 0.05; // Minimum imbalance strength (15% imbalance on -1 to +1 scale)
 
 input group "===== CÀI ??T B?O V? TIN T?C ====="
 input bool EnableNewsProtection = true;     // B?t/t?t b?o v? tin t?c
@@ -10312,7 +10312,7 @@ if (g_TotalOrders_Buy == 0 && g_TotalOrders_Sell == 0)
     // Thử mở lệnh bằng chiến thuật AI Imbalance
     if (OpenOrderByAIImbalance())
     {
-    CleanupPendingZoneOrders();
+CancelAllZonePendingOrders();
     }
     else 
     {
@@ -10322,6 +10322,8 @@ if (g_TotalOrders_Buy == 0 && g_TotalOrders_Sell == 0)
         // Kiểm tra xem có lệnh mới được mở không
         if (g_TotalOrders_Buy == 0 && g_TotalOrders_Sell == 0)
         {
+        if (g_InsideBox < g_CurrentAIThreshold ){
+  HandleRegularDCA();}
 
 HandleSingleDirectionEntry();
 
@@ -10335,11 +10337,9 @@ HandleSingleDirectionEntry();
 // ModifyOrdersTPEnhanced(currentPrice); // DISABLED
   // A. INSIDE BOX → SIDEWAY TRADING
 
-   if(g_InsideBox < g_CurrentAIThreshold && g_TotalOrders_Buy == 0 && g_TotalOrders_Sell == 0) {
+   if(g_TotalOrders_Buy == 0 && g_TotalOrders_Sell == 0 &&g_InsideBox < g_CurrentAIThreshold ) {
     // Narrow range checks (bổ sung cho sideway)
   CancelAllZonePendingOrders();
-
-  HandleRegularDCA();
     OrderFlowStrength flowStrength = AnalyzeOrderFlowAdvanced();
     if(flowStrength == FLOW_STRONG_SELL && g_TotalOrders_Buy > 0) return;
 
