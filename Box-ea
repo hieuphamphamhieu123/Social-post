@@ -10307,7 +10307,7 @@ RunFlexibleZoneStrategy();
 // Chỉ thử mở nếu không có lệnh trong hướng đó (tránh xung đột)
 // SCALPING PRIORITY 1: AI Imbalance (Cao nhất - mở lệnh khi có tín hiệu AI mạnh)
 // Chỉ thử mở nếu không có lệnh trong hướng đó (tránh xung đột)
-if (g_TotalOrders_Buy == 0 || g_TotalOrders_Sell == 0)
+if (g_TotalOrders_Buy == 0 && g_TotalOrders_Sell == 0)
 {
     // Thử mở lệnh bằng chiến thuật AI Imbalance
     if (OpenOrderByAIImbalance())
@@ -10337,6 +10337,8 @@ HandleSingleDirectionEntry();
 
    if(g_InsideBox < g_CurrentAIThreshold && g_TotalOrders_Buy == 0 && g_TotalOrders_Sell == 0) {
     // Narrow range checks (bổ sung cho sideway)
+  CancelAllZonePendingOrders();
+
   HandleRegularDCA();
     OrderFlowStrength flowStrength = AnalyzeOrderFlowAdvanced();
     if(flowStrength == FLOW_STRONG_SELL && g_TotalOrders_Buy > 0) return;
