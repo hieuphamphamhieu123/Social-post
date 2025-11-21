@@ -10294,7 +10294,8 @@ CheckLastOrderClosed(); // Đóng tất cả nếu lệnh cuối đóng
               if(g_InsideBox > g_CurrentAIThreshold ) {
               if (g_TotalOrders_Buy == 0 && g_TotalOrders_Sell == 0)
 {
-RunFlexibleZoneStrategy();}
+RunFlexibleZoneStrategy();
+}
                  CloseAllPositionsEarly(10,100);
 
               return;
@@ -11020,7 +11021,6 @@ void CheckActivatedZoneOrders() {
                 g_ActivatedBuyCount++;
 
                 // NEW: Cancel all other zone pending orders when new position detected
-                Print("New Zone BUY position detected (Cycle ", cycleId, "). Cancelling all zone pending orders...");
                 CancelAllZonePendingOrders();
             }
         } else { // POSITION_TYPE_SELL
@@ -11042,7 +11042,7 @@ void CheckActivatedZoneOrders() {
                 g_ActivatedSellCount++;
 
                 // NEW: Cancel all other zone pending orders when new position detected
-                Print("New Zone SELL position detected (Cycle ", cycleId, "). Cancelling all zone pending orders...");
+
                 CancelAllZonePendingOrders();
             }
         }
@@ -11098,7 +11098,7 @@ void CheckActivatedZoneOrders() {
                                         g_ActivatedBuyCount++;
 
                                         // NEW: Cancel all other zone pending orders when one is activated
-                                        Print("Zone BUY order activated (Cycle ", cycleId, "). Cancelling all other zone pending orders...");
+
                                         CancelAllZonePendingOrders();
 
                                         break;
@@ -11166,7 +11166,7 @@ void CheckActivatedZoneOrders() {
                                         g_ActivatedSellCount++;
 
                                         // NEW: Cancel all other zone pending orders when one is activated
-                                        Print("Zone SELL order activated (Cycle ", cycleId, "). Cancelling all other zone pending orders...");
+
                                         CancelAllZonePendingOrders();
 
                                         break;
@@ -11693,22 +11693,20 @@ void CancelAllZonePendingOrders() {
     }
 
     if(totalZoneOrders == 0) {
-        Print("[CancelAllZonePendingOrders] No zone pending orders found");
+
         return;
     }
 
-    Print("[CancelAllZonePendingOrders] Found ", totalZoneOrders, " zone pending orders. Attempting to delete...");
+
 
     // Now delete them
     for(int i = OrdersTotal() - 1; i >= 0; i--) {
         ulong ticket = OrderGetTicket(i);
         if(ticket == 0) {
-            Print("[CancelAllZonePendingOrders] Failed to get ticket at index ", i);
             continue;
         }
 
         if(!OrderSelect(ticket)) {
-            Print("[CancelAllZonePendingOrders] Failed to select order #", ticket);
             continue;
         }
 
@@ -11719,23 +11717,17 @@ void CancelAllZonePendingOrders() {
             ENUM_ORDER_TYPE orderType = (ENUM_ORDER_TYPE)OrderGetInteger(ORDER_TYPE);
             double orderPrice = OrderGetDouble(ORDER_PRICE_OPEN);
 
-            Print("[CancelAllZonePendingOrders] Attempting to delete order #", ticket,
-                  " Type: ", EnumToString(orderType),
-                  " Price: ", orderPrice,
-                  " Comment: ", comment);
 
             if(trade.OrderDelete(ticket)) {
                 deletedCount++;
-                Print("[CancelAllZonePendingOrders] Successfully deleted order #", ticket);
             } else {
                 int error = GetLastError();
-                Print("[CancelAllZonePendingOrders] FAILED to delete order #", ticket,
-                      " Error: ", error, " - ", ErrorDescription(error));
+              
             }
         }
     }
 
-    Print("[CancelAllZonePendingOrders] Deleted ", deletedCount, " out of ", totalZoneOrders, " zone pending orders");
+
 
     // Reset zone tracking variables
     for(int i = 0; i < g_BuyZonesCount; i++) {
