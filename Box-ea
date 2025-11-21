@@ -10233,6 +10233,9 @@ if(g_WaitingForCycleCompletion && g_InsideBox<g_CurrentAIThreshold) {
 // AIBasedStopLoss(); // DISABLED - Chỉ quản lý lệnh cuối cùng
 UpdateAIBlockDCA(); // Cập nhật Block DCA flags dựa trên Range & Imbalance
 
+// NEW: Monitor zone orders and cancel pending orders when one is activated
+CheckActivatedZoneOrders();
+
 // NEW: Quản lý TP/SL chỉ cho lệnh cuối cùng
 ManageLastOrderTPSL();
 CheckLastOrderClosed(); // Đóng tất cả nếu lệnh cuối đóng
@@ -10289,7 +10292,9 @@ CheckLastOrderClosed(); // Đóng tất cả nếu lệnh cuối đóng
     }
     
               if(g_InsideBox > g_CurrentAIThreshold ) {
-              RunFlexibleZoneStrategy();
+              if (g_TotalOrders_Buy == 0 && g_TotalOrders_Sell == 0)
+{
+RunFlexibleZoneStrategy();}
                  CloseAllPositionsEarly(10,100);
 
               return;
@@ -11013,8 +11018,10 @@ void CheckActivatedZoneOrders() {
                 g_ActivatedBuyOrders[g_ActivatedBuyCount].lastTicket = ticket;
                 g_ActivatedBuyOrders[g_ActivatedBuyCount].lastOpenPrice = openPrice;
                 g_ActivatedBuyCount++;
-                
-           
+
+                // NEW: Cancel all other zone pending orders when new position detected
+                Print("New Zone BUY position detected (Cycle ", cycleId, "). Cancelling all zone pending orders...");
+                CancelAllZonePendingOrders();
             }
         } else { // POSITION_TYPE_SELL
             for(int j = 0; j < g_ActivatedSellCount; j++) {
@@ -11033,8 +11040,10 @@ void CheckActivatedZoneOrders() {
                 g_ActivatedSellOrders[g_ActivatedSellCount].lastTicket = ticket;
                 g_ActivatedSellOrders[g_ActivatedSellCount].lastOpenPrice = openPrice;
                 g_ActivatedSellCount++;
-                
-       
+
+                // NEW: Cancel all other zone pending orders when new position detected
+                Print("New Zone SELL position detected (Cycle ", cycleId, "). Cancelling all zone pending orders...");
+                CancelAllZonePendingOrders();
             }
         }
     }
@@ -11087,7 +11096,11 @@ void CheckActivatedZoneOrders() {
                                         g_ActivatedBuyOrders[g_ActivatedBuyCount].lastTicket = posTicket;
                                         g_ActivatedBuyOrders[g_ActivatedBuyCount].lastOpenPrice = dealPrice;
                                         g_ActivatedBuyCount++;
-                               
+
+                                        // NEW: Cancel all other zone pending orders when one is activated
+                                        Print("Zone BUY order activated (Cycle ", cycleId, "). Cancelling all other zone pending orders...");
+                                        CancelAllZonePendingOrders();
+
                                         break;
                                     }
                                 }
@@ -11151,8 +11164,11 @@ void CheckActivatedZoneOrders() {
                                         g_ActivatedSellOrders[g_ActivatedSellCount].lastTicket = posTicket;
                                         g_ActivatedSellOrders[g_ActivatedSellCount].lastOpenPrice = dealPrice;
                                         g_ActivatedSellCount++;
-                                        
-                                 
+
+                                        // NEW: Cancel all other zone pending orders when one is activated
+                                        Print("Zone SELL order activated (Cycle ", cycleId, "). Cancelling all other zone pending orders...");
+                                        CancelAllZonePendingOrders();
+
                                         break;
                                     }
                                 }
@@ -11568,7 +11584,7 @@ input bool EnableSimultaneousZoneOrders = true; // Allow placing both buy and se
 
 // Add these global variables
 datetime g_LastZoneOrderPlacement = 0;          // Track when zone orders were last placed
-const int ZONE_ORDER_PLACEMENT_COOLDOWN = 300;  // Cooldown between placements (5 minutes)
+const int ZONE_ORDER_PLACEMENT_COOLDOWN = 1;  // Cooldown between placements (5 minutes)
 int g_CurrentZoneOrderCount = 0;                // Track number of active zone order pairs
 // Sửa hàm PlacePendingOrdersAtZones để áp dụng logic tâm giá
 void PlacePendingOrdersAtZones() {
@@ -11660,15 +11676,89 @@ void PlacePendingOrdersAtZones() {
 
 // Hàm xóa tất cả pending orders zone
 void CancelAllZonePendingOrders() {
+    int deletedCount = 0;
+    int totalZoneOrders = 0;
+
+    // First count how many zone orders exist
     for(int i = OrdersTotal() - 1; i >= 0; i--) {
         ulong ticket = OrderGetTicket(i);
+        if(ticket == 0) continue;
         if(!OrderSelect(ticket)) continue;
         if(OrderGetString(ORDER_SYMBOL) != _Symbol) continue;
-        
+
         string comment = OrderGetString(ORDER_COMMENT);
         if(StringFind(comment, "Zone") >= 0) {
-            trade.OrderDelete(ticket);
+            totalZoneOrders++;
         }
+    }
+
+    if(totalZoneOrders == 0) {
+        Print("[CancelAllZonePendingOrders] No zone pending orders found");
+        return;
+    }
+
+    Print("[CancelAllZonePendingOrders] Found ", totalZoneOrders, " zone pending orders. Attempting to delete...");
+
+    // Now delete them
+    for(int i = OrdersTotal() - 1; i >= 0; i--) {
+        ulong ticket = OrderGetTicket(i);
+        if(ticket == 0) {
+            Print("[CancelAllZonePendingOrders] Failed to get ticket at index ", i);
+            continue;
+        }
+
+        if(!OrderSelect(ticket)) {
+            Print("[CancelAllZonePendingOrders] Failed to select order #", ticket);
+            continue;
+        }
+
+        if(OrderGetString(ORDER_SYMBOL) != _Symbol) continue;
+
+        string comment = OrderGetString(ORDER_COMMENT);
+        if(StringFind(comment, "Zone") >= 0) {
+            ENUM_ORDER_TYPE orderType = (ENUM_ORDER_TYPE)OrderGetInteger(ORDER_TYPE);
+            double orderPrice = OrderGetDouble(ORDER_PRICE_OPEN);
+
+            Print("[CancelAllZonePendingOrders] Attempting to delete order #", ticket,
+                  " Type: ", EnumToString(orderType),
+                  " Price: ", orderPrice,
+                  " Comment: ", comment);
+
+            if(trade.OrderDelete(ticket)) {
+                deletedCount++;
+                Print("[CancelAllZonePendingOrders] Successfully deleted order #", ticket);
+            } else {
+                int error = GetLastError();
+                Print("[CancelAllZonePendingOrders] FAILED to delete order #", ticket,
+                      " Error: ", error, " - ", ErrorDescription(error));
+            }
+        }
+    }
+
+    Print("[CancelAllZonePendingOrders] Deleted ", deletedCount, " out of ", totalZoneOrders, " zone pending orders");
+
+    // Reset zone tracking variables
+    for(int i = 0; i < g_BuyZonesCount; i++) {
+        g_BuyZones[i].pendingOrderTicket = 0;
+    }
+
+    for(int i = 0; i < g_SellZonesCount; i++) {
+        g_SellZones[i].pendingOrderTicket = 0;
+    }
+}
+
+// Helper function to get error description
+string ErrorDescription(int errorCode) {
+    switch(errorCode) {
+        case 0: return "No error";
+        case 4756: return "Order not found";
+        case 10015: return "Modify denied";
+        case 10016: return "Context busy";
+        case 10017: return "Expiration denied";
+        case 10018: return "Too many orders";
+        case 10019: return "Hedging prohibited";
+        case 10020: return "Prohibited by FIFO rule";
+        default: return "Unknown error";
     }
 }// Sửa logic đặt zone orders để luôn cách giá hiện tại đúng khoảng ZoneStopDistance
 
@@ -12570,8 +12660,7 @@ void ActivateZoneStrategy() {
 
     // 1. KIỂM TRA COOLDOWN - Tránh đặt lệnh liên tục
     if(currentTime - g_LastZoneOrderPlacement < ZONE_ORDER_PLACEMENT_COOLDOWN) {
-        Print("ActivateZoneStrategy: Cooldown active, skipping. Time remaining: ",
-              (ZONE_ORDER_PLACEMENT_COOLDOWN - (currentTime - g_LastZoneOrderPlacement)), " seconds");
+      
         return;
     }
 
@@ -12581,12 +12670,10 @@ void ActivateZoneStrategy() {
 
     // Nếu đã có lệnh zone active ở cả 2 phía, không đặt thêm
     if(hasActiveBuyZone && hasActiveSellZone) {
-        Print("ActivateZoneStrategy: Both buy and sell zone positions already active, skipping");
         return;
     }
 
     // 3. TÍNH TOÁN VÀ ĐẶT ZONE ORDERS MỚI
-    Print("ActivateZoneStrategy: Placing new zone orders. HasActiveBuy=", hasActiveBuyZone, " HasActiveSell=", hasActiveSellZone);
 
     CalculateOptimalPriceZones();
 
@@ -12664,12 +12751,14 @@ void CancelRegularDCAPendingOrders() {
 }
 
 bool RunFlexibleZoneStrategy() {
-                double currentpirce = GetCleanPrice();
+    double currentpirce = GetCleanPrice();
+
+    // Check and cancel other pending orders when a zone order is activated
+    CheckActivatedZoneOrders();
 
     switch(g_CurrentMode) {
        case MODE_NORMAL:
        ManageFlexibleZoneStrategy();
-                  ManageZoneDCA();
 
        
             break;
@@ -12687,7 +12776,6 @@ bool RunFlexibleZoneStrategy() {
                 
                 if(canTradeBuyZone || canTradeSellZone) {
            ManagePriceZoneStrategy();
-           ManageZoneDCA();
               
                 }
             }
