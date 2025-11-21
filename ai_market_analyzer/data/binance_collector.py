@@ -232,8 +232,48 @@ class BinanceOrderFlowCollector:
         sell_volume = sum(t['quantity'] for t in recent_trades if t['is_buyer_maker'])
         total_volume = buy_volume + sell_volume
 
-        # Volume imbalance
-        volume_imbalance = (buy_volume - sell_volume) / total_volume if total_volume > 0 else 0
+        # ===== IMPROVED VOLUME IMBALANCE CALCULATION =====
+        # 1. Time-weighted volume imbalance (trades gần đây quan trọng hơn)
+        if total_volume > 0:
+            # Exponential decay: weight giảm theo thời gian (trades cũ hơn có weight thấp hơn)
+            decay_factor = 30000  # 30 seconds half-life
+            weighted_buy = 0
+            weighted_sell = 0
+            total_weight = 0
+
+            for t in recent_trades:
+                age = current_time - t['timestamp']  # milliseconds
+                weight = np.exp(-age / decay_factor)  # exponential decay
+
+                # Size-weighted: large trades có impact lớn hơn (power 1.1 để tăng nhẹ impact)
+                volume_weight = weight * (t['quantity'] ** 1.1)
+                total_weight += volume_weight
+
+                if not t['is_buyer_maker']:  # Market buy (aggressive)
+                    weighted_buy += volume_weight
+                else:  # Market sell (aggressive)
+                    weighted_sell += volume_weight
+
+            # Volume imbalance từ trades (-1 to +1)
+            trade_imbalance = (weighted_buy - weighted_sell) / total_weight if total_weight > 0 else 0
+
+            # 2. Order book imbalance để confirm direction
+            if len(self.orderbook_snapshots) > 0:
+                latest_ob = self.orderbook_snapshots[-1]
+                bid_volume = sum(bid[1] for bid in latest_ob['bids'][:20])
+                ask_volume = sum(ask[1] for ask in latest_ob['asks'][:20])
+                ob_imbalance_temp = (bid_volume - ask_volume) / (bid_volume + ask_volume) if (bid_volume + ask_volume) > 0 else 0
+            else:
+                ob_imbalance_temp = 0
+
+            # 3. Combined imbalance: 70% trades + 30% order book
+            # Trades phản ánh hành động thực tế, order book phản ánh ý định
+            volume_imbalance = 0.70 * trade_imbalance + 0.30 * ob_imbalance_temp
+
+            # Clamp to [-1, 1] để đảm bảo
+            volume_imbalance = max(-1.0, min(1.0, volume_imbalance))
+        else:
+            volume_imbalance = 0.0
 
         # Large trades (trades > average * 3)
         avg_trade_size = total_volume / len(recent_trades) if recent_trades else 0

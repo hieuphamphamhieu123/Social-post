@@ -225,7 +225,13 @@ class WebSocketCollector:
         if len(self.trades_buffer) < 10:
             return
 
-        recent_trades = list(self.trades_buffer)
+        # Filter trades from last 60 seconds
+        current_time = int(time.time() * 1000)
+        one_minute_ago = current_time - 60000
+        recent_trades = [t for t in self.trades_buffer if t['timestamp'] > one_minute_ago]
+
+        if not recent_trades:
+            return
 
         # Calculate price volatility
         prices = [t['price'] for t in recent_trades]
@@ -240,8 +246,47 @@ class WebSocketCollector:
         sell_volume = sum(t['quantity'] for t in recent_trades if t['is_buyer_maker'])
         total_volume = buy_volume + sell_volume
 
-        # Volume imbalance
-        volume_imbalance = (buy_volume - sell_volume) / total_volume if total_volume > 0 else 0
+        # ===== IMPROVED VOLUME IMBALANCE CALCULATION =====
+        # 1. Time-weighted volume imbalance (trades gần đây quan trọng hơn)
+        if total_volume > 0:
+            # Exponential decay: weight giảm theo thời gian
+            decay_factor = 30000  # 30 seconds half-life
+            weighted_buy = 0
+            weighted_sell = 0
+            total_weight = 0
+
+            for t in recent_trades:
+                age = current_time - t['timestamp']  # milliseconds
+                weight = np.exp(-age / decay_factor)  # exponential decay
+
+                # Size-weighted: large trades có impact lớn hơn
+                volume_weight = weight * (t['quantity'] ** 1.1)
+                total_weight += volume_weight
+
+                if not t['is_buyer_maker']:  # Market buy (aggressive)
+                    weighted_buy += volume_weight
+                else:  # Market sell (aggressive)
+                    weighted_sell += volume_weight
+
+            # Volume imbalance từ trades (-1 to +1)
+            trade_imbalance = (weighted_buy - weighted_sell) / total_weight if total_weight > 0 else 0
+
+            # 2. Order book imbalance để confirm direction
+            depth = self.current_depth
+            if depth['bids'] and depth['asks']:
+                bid_volume_ob = sum(bid[1] for bid in depth['bids'][:20])
+                ask_volume_ob = sum(ask[1] for ask in depth['asks'][:20])
+                ob_imbalance_temp = (bid_volume_ob - ask_volume_ob) / (bid_volume_ob + ask_volume_ob) if (bid_volume_ob + ask_volume_ob) > 0 else 0
+            else:
+                ob_imbalance_temp = 0
+
+            # 3. Combined imbalance: 70% trades + 30% order book
+            volume_imbalance = 0.70 * trade_imbalance + 0.30 * ob_imbalance_temp
+
+            # Clamp to [-1, 1]
+            volume_imbalance = max(-1.0, min(1.0, volume_imbalance))
+        else:
+            volume_imbalance = 0.0
 
         # Large trades
         avg_trade_size = total_volume / len(recent_trades) if recent_trades else 0

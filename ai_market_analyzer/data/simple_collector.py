@@ -7,6 +7,7 @@ from datetime import datetime
 import time
 from collections import deque
 from loguru import logger
+import numpy as np
 
 
 class SimpleCollector:
@@ -170,7 +171,6 @@ class SimpleCollector:
         price_range_pct = (price_range / price_low) * 100 if price_low > 0 else 0
 
         # Calculate price volatility (standard deviation)
-        import numpy as np
         price_volatility = np.std(prices) if len(prices) > 1 else 0
 
         # Calculate buy/sell volume
@@ -181,8 +181,44 @@ class SimpleCollector:
         logger.debug(f"Price Range: {price_range:.2f} ({price_range_pct:.4f}%) | Volatility: {price_volatility:.2f}")
         logger.debug(f"Buy: {buy_volume}, Sell: {sell_volume}, Total: {total_volume}")
 
-        # Volume imbalance
-        volume_imbalance = (buy_volume - sell_volume) / total_volume if total_volume > 0 else 0
+        # ===== IMPROVED VOLUME IMBALANCE CALCULATION =====
+        # REST API không có timestamp chính xác, dùng position-based weighting
+        if total_volume > 0:
+            weighted_buy = 0
+            weighted_sell = 0
+            total_weight = 0
+
+            total_trades = len(recent_trades)
+            for idx, t in enumerate(recent_trades):
+                # Position-based weight: trades mới hơn (idx cao hơn) có weight cao hơn
+                # Weight tăng exponentially: early trades = 0.1x, latest trades = 1.0x
+                position_factor = (idx + 1) / total_trades  # 0 to 1
+                weight = np.exp(position_factor * 2) / np.exp(2)  # normalize to 0.13 to 1.0
+
+                # Size-weighted: large trades có impact lớn hơn
+                volume_weight = weight * (t['quantity'] ** 1.1)
+                total_weight += volume_weight
+
+                if not t['is_buyer_maker']:  # Market buy (aggressive)
+                    weighted_buy += volume_weight
+                else:  # Market sell (aggressive)
+                    weighted_sell += volume_weight
+
+            # Volume imbalance từ trades (-1 to +1)
+            trade_imbalance = (weighted_buy - weighted_sell) / total_weight if total_weight > 0 else 0
+
+            # Order book imbalance để confirm direction
+            bid_volume_ob = sum(float(bid[1]) for bid in depth['bids'][:20])
+            ask_volume_ob = sum(float(ask[1]) for ask in depth['asks'][:20])
+            ob_imbalance_temp = (bid_volume_ob - ask_volume_ob) / (bid_volume_ob + ask_volume_ob) if (bid_volume_ob + ask_volume_ob) > 0 else 0
+
+            # Combined imbalance: 70% trades + 30% order book
+            volume_imbalance = 0.70 * trade_imbalance + 0.30 * ob_imbalance_temp
+
+            # Clamp to [-1, 1]
+            volume_imbalance = max(-1.0, min(1.0, volume_imbalance))
+        else:
+            volume_imbalance = 0.0
 
         # Large trades
         avg_trade_size = total_volume / len(recent_trades) if recent_trades else 0
