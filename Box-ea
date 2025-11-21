@@ -10192,20 +10192,11 @@ void OnTick() {
     g_InsideBox = CalculateMarketRange();
 
     // DEBUG: Log values to see why condition may not trigger
-    static datetime lastDebugLog = 0;
-    if(TimeCurrent() - lastDebugLog > 10) { // Log every 10 seconds
-        Print("DEBUG OnTick: g_InsideBox=", g_InsideBox, " g_CurrentAIThreshold=", g_CurrentAIThreshold, " Condition=", (g_InsideBox > g_CurrentAIThreshold ? "TRUE" : "FALSE"));
-        lastDebugLog = TimeCurrent();
-    }
+  
 
     // =============================================================================
     // Sau khi xác định g_InsideBox
         double currentPrice = GetCleanPrice();
-              if(g_InsideBox > g_CurrentAIThreshold ) {
-              Print("EXECUTING RunFlexibleZoneStrategy() - g_InsideBox=", g_InsideBox, " > g_CurrentAIThreshold=", g_CurrentAIThreshold);
-              RunFlexibleZoneStrategy();
-return;
-}
 
 HandleCycleCompletion();
 
@@ -10284,6 +10275,7 @@ CheckLastOrderClosed(); // Đóng tất cả nếu lệnh cuối đóng
     // =============================================================================
     // 3. PHÁT HIỆN BOX (H1) - ƯU TIÊN CAO NHẤT
     // =============================================================================
+           HandleParallelDCA(currentPrice);
 
     DetectH1Box();
     // g_InsideBox already calculated at the beginning of OnTick()
@@ -10296,7 +10288,12 @@ CheckLastOrderClosed(); // Đóng tất cả nếu lệnh cuối đóng
         string msg = StringFormat("OnTick: UsedMarketRange=%.0f Source=%s Mode=%s Symbol=%s Time=%s", mr, source, mode, _Symbol, TimeToString(TimeCurrent(), TIME_DATE|TIME_SECONDS));
     }
     
+              if(g_InsideBox > g_CurrentAIThreshold ) {
+              RunFlexibleZoneStrategy();
+                 CloseAllPositionsEarly(10,100);
 
+              return;
+}
     // =============================================================================
     // 4. TRADING LOGIC DỰA TRÊN BOX
     // =============================================================================
@@ -10309,6 +10306,7 @@ if (g_TotalOrders_Buy == 0 || g_TotalOrders_Sell == 0)
     // Thử mở lệnh bằng chiến thuật AI Imbalance
     if (OpenOrderByAIImbalance())
     {
+    CleanupPendingZoneOrders();
     }
     else 
     {
@@ -10324,17 +10322,12 @@ HandleSingleDirectionEntry();
         }
     }
 }
-           HandleParallelDCA(currentPrice);
+           
+
 
 
 // ModifyOrdersTPEnhanced(currentPrice); // DISABLED
   // A. INSIDE BOX → SIDEWAY TRADING
-
-              if(g_InsideBox > g_CurrentAIThreshold ) {
-                   RunFlexibleZoneStrategy();
-
-   CloseAllPositionsEarly(10,100);
-}
 
    if(g_InsideBox < g_CurrentAIThreshold && g_TotalOrders_Buy == 0 && g_TotalOrders_Sell == 0) {
     // Narrow range checks (bổ sung cho sideway)
@@ -12573,12 +12566,36 @@ void HandleMixedModeLogic(double marketRange, double priceMovement, double curre
 
 // Kích hoạt zone strategy
 void ActivateZoneStrategy() {
-    // Tính toán và đặt zone orders mới
+    datetime currentTime = TimeCurrent();
+
+    // 1. KIỂM TRA COOLDOWN - Tránh đặt lệnh liên tục
+    if(currentTime - g_LastZoneOrderPlacement < ZONE_ORDER_PLACEMENT_COOLDOWN) {
+        Print("ActivateZoneStrategy: Cooldown active, skipping. Time remaining: ",
+              (ZONE_ORDER_PLACEMENT_COOLDOWN - (currentTime - g_LastZoneOrderPlacement)), " seconds");
+        return;
+    }
+
+    // 2. KIỂM TRA ĐÃ CÓ LỆNH ZONE ACTIVE CHƯA
+    bool hasActiveBuyZone = HasActiveZonePositions(POSITION_TYPE_BUY);
+    bool hasActiveSellZone = HasActiveZonePositions(POSITION_TYPE_SELL);
+
+    // Nếu đã có lệnh zone active ở cả 2 phía, không đặt thêm
+    if(hasActiveBuyZone && hasActiveSellZone) {
+        Print("ActivateZoneStrategy: Both buy and sell zone positions already active, skipping");
+        return;
+    }
+
+    // 3. TÍNH TOÁN VÀ ĐẶT ZONE ORDERS MỚI
+    Print("ActivateZoneStrategy: Placing new zone orders. HasActiveBuy=", hasActiveBuyZone, " HasActiveSell=", hasActiveSellZone);
+
     CalculateOptimalPriceZones();
-    
+
     // Đặt pending orders cho zones
     double currentPrice = GetCleanPrice();
     PlaceInitialZoneOrders(currentPrice);
+
+    // Cập nhật thời gian đặt lệnh cuối cùng
+    g_LastZoneOrderPlacement = currentTime;
 }
 
 // Kích hoạt lại DCA thông thường
@@ -12652,6 +12669,8 @@ bool RunFlexibleZoneStrategy() {
     switch(g_CurrentMode) {
        case MODE_NORMAL:
        ManageFlexibleZoneStrategy();
+                  ManageZoneDCA();
+
        
             break;
             
@@ -12668,6 +12687,7 @@ bool RunFlexibleZoneStrategy() {
                 
                 if(canTradeBuyZone || canTradeSellZone) {
            ManagePriceZoneStrategy();
+           ManageZoneDCA();
               
                 }
             }
