@@ -194,7 +194,7 @@ input bool AI_BlockDCA_OnWrongDirection = true; // Ngăn DCA khi lệnh ngược
 
 // Rest of the global variables remain the same
 // AI Threshold - bi?n toàn c?c ???c c?p nh?t t? AI
-double g_CurrentAIThreshold = 15000;  // Giá tr? m?c ??nh b?ng MarketRangeThreshold
+double g_CurrentAIThreshold = AI_MarketRangeThreshold;  // Giá tr? m?c ??nh b?ng MarketRangeThreshold
 datetime g_LastThresholdUpdate = 0;   // Th?i gian c?p nh?t threshold cu?i cùng
 
 double g_WeeklyRangeAverage = 0;
@@ -271,7 +271,7 @@ const int MIN_ORDER_MOD_INTERVAL = 5; // 5 seconds minimum between modifications
 datetime g_LastAIOrderTime = 0;
 bool g_AI_OrderPending = false; // Flag để ngăn mở trùng lặp trong cùng 1 tick
 const int AI_ORDER_COOLDOWN = 1; // 60 seconds cooldown between AI imbalance orders
-const double AI_MIN_IMBALANCE_THRESHOLD = 0.1; // Minimum imbalance strength (15% imbalance on -1 to +1 scale)
+const double AI_MIN_IMBALANCE_THRESHOLD = 0.01; // Minimum imbalance strength (15% imbalance on -1 to +1 scale)
 
 input group "===== CÀI ??T B?O V? TIN T?C ====="
 input bool EnableNewsProtection = true;     // B?t/t?t b?o v? tin t?c
@@ -2196,6 +2196,12 @@ double CalculateMarketRange() {
 //| Update AI Threshold - C?p nh?t ng??ng AI ??ng                    |
 //+------------------------------------------------------------------+
 void UpdateAIThreshold() {
+    // DISABLED: This function had wrong logic - it was setting threshold = current market range
+    // This caused g_CurrentAIThreshold to always equal g_InsideBox, making comparisons useless
+    // Now g_CurrentAIThreshold keeps its initial value (AI_MarketRangeThreshold = 5000)
+    return;
+
+    /* OLD WRONG LOGIC - COMMENTED OUT
     // Ki?m tra th?i gian c?p nh?t
     if(TimeCurrent() - g_LastThresholdUpdate < AIThresholdUpdateInterval) {
         return; // Ch?a ??n th?i gian c?p nh?t
@@ -2206,18 +2212,16 @@ void UpdateAIThreshold() {
 
     // N?u l?y ???c giá tr? h?p l?, c?p nh?t threshold
     if(currentRange > 0) {
-        g_CurrentAIThreshold = currentRange;
+        g_CurrentAIThreshold = currentRange;  // ❌ WRONG: This makes threshold = current range!
         g_LastThresholdUpdate = TimeCurrent();
-
-
     }
     else {
         // N?u không l?y ???c t? AI, gi? nguyên giá tr? c? ho?c dùng m?c ??nh
         if(g_CurrentAIThreshold == 0) {
             g_CurrentAIThreshold = MarketRangeThreshold;
         }
-
     }
+    */
 }
 
 // Function to check if current time is within news protection period
@@ -7563,13 +7567,13 @@ void HandleCycleCompletion() {
     }
     
     // NẾU VẪN CÒN LỆNH SIDEWAY → KHÔNG CHO CHUYỂN SANG BREAKOUT
-    if(currentTradeType == TRADE_SIDEWAY && !g_InsideBox) {
+    if(currentTradeType == TRADE_SIDEWAY && g_InsideBox > g_CurrentAIThreshold) {
         g_WaitingForCycleCompletion = true;
-      
+
     }
-    
+
     // NẾU VẪN CÒN LỆNH BREAKOUT → KHÔNG CHO CHUYỂN SANG SIDEWAY
-    if(currentTradeType == TRADE_BREAKOUT && g_InsideBox) {
+    if(currentTradeType == TRADE_BREAKOUT && g_InsideBox < g_CurrentAIThreshold) {
         g_WaitingForCycleCompletion = true;
       
     }
@@ -9283,7 +9287,7 @@ double g_MFI_Buffer[];
 // GLOBALS - Thêm vào đầu file
 double g_BoxHigh = 0;
 double g_BoxLow = 0;
-bool g_InsideBox = false;
+double g_InsideBox = 0;  // Changed from bool to double to store market range value
 datetime g_BoxLastUpdate = 0;
 // Thêm globals để lưu box cũ
 double g_PreviousBoxHigh = 0;
@@ -9869,8 +9873,8 @@ void UpdateAIBlockDCA() {
     }
 
     // Chỉ xét dấu của imbalance
-    bool marketBullish = (imbalance > 0);  // Dấu dương
-    bool marketBearish = (imbalance < 0);  // Dấu âm
+    bool marketBullish = (imbalance > 0.05);  // Dấu dương
+    bool marketBearish = (imbalance < -0.05);  // Dấu âm
 
     // Block DCA theo hướng ngược lại với market
     if(marketBearish && AI_BlockDCA_OnWrongDirection) {
@@ -10184,9 +10188,24 @@ void OnTick() {
     // C?p nh?t AI Threshold (t? ??ng ki?m tra interval b?n trong hàm)
     UpdateAIThreshold();
 
+    // Calculate market range once at the beginning
+    g_InsideBox = CalculateMarketRange();
+
+    // DEBUG: Log values to see why condition may not trigger
+    static datetime lastDebugLog = 0;
+    if(TimeCurrent() - lastDebugLog > 10) { // Log every 10 seconds
+        Print("DEBUG OnTick: g_InsideBox=", g_InsideBox, " g_CurrentAIThreshold=", g_CurrentAIThreshold, " Condition=", (g_InsideBox > g_CurrentAIThreshold ? "TRUE" : "FALSE"));
+        lastDebugLog = TimeCurrent();
+    }
+
     // =============================================================================
     // Sau khi xác định g_InsideBox
         double currentPrice = GetCleanPrice();
+              if(g_InsideBox > g_CurrentAIThreshold ) {
+              Print("EXECUTING RunFlexibleZoneStrategy() - g_InsideBox=", g_InsideBox, " > g_CurrentAIThreshold=", g_CurrentAIThreshold);
+              RunFlexibleZoneStrategy();
+return;
+}
 
 HandleCycleCompletion();
 
@@ -10195,7 +10214,7 @@ if(g_WaitingForCycleCompletion && g_InsideBox<g_CurrentAIThreshold) {
     ActiveTradeType activeType = GetActiveTradeType();
     
     // Nếu có lệnh sideway nhưng đã outside box → Tiếp tục DCA sideway
-    if(activeType == TRADE_SIDEWAY && !g_InsideBox) {
+    if(activeType == TRADE_SIDEWAY && g_InsideBox > g_CurrentAIThreshold) {
         // ModifyOrdersTPEnhanced(currentPrice); // DISABLED
 
         if(g_TotalOrders_Buy > 0 && CheckAnyTPReached(currentPrice, POSITION_TYPE_BUY)) {
@@ -10208,7 +10227,7 @@ if(g_WaitingForCycleCompletion && g_InsideBox<g_CurrentAIThreshold) {
     }
 
     // Nếu có lệnh breakout nhưng đã inside box → Tiếp tục DCA breakout
-    if(activeType == TRADE_BREAKOUT && g_InsideBox>g_CurrentAIThreshold) {
+    if(activeType == TRADE_BREAKOUT && g_InsideBox < g_CurrentAIThreshold) {
         // ModifyOrdersTPEnhanced(currentPrice); // DISABLED
       if(g_TotalOrders_Buy > 0 && CheckAnyTPReached(currentPrice, POSITION_TYPE_BUY)) {
             ResetTrendModeTracking();
@@ -10265,9 +10284,9 @@ CheckLastOrderClosed(); // Đóng tất cả nếu lệnh cuối đóng
     // =============================================================================
     // 3. PHÁT HIỆN BOX (H1) - ƯU TIÊN CAO NHẤT
     // =============================================================================
-    
+
     DetectH1Box();
-    g_InsideBox = CalculateMarketRange();
+    // g_InsideBox already calculated at the beginning of OnTick()
     // DEBUG: Print the current market range (the value actually used) and whether it came from AI
     {
         double mr = g_InsideBox; // value returned by CalculateMarketRange()
@@ -10277,7 +10296,7 @@ CheckLastOrderClosed(); // Đóng tất cả nếu lệnh cuối đóng
         string msg = StringFormat("OnTick: UsedMarketRange=%.0f Source=%s Mode=%s Symbol=%s Time=%s", mr, source, mode, _Symbol, TimeToString(TimeCurrent(), TIME_DATE|TIME_SECONDS));
     }
     
- 
+
     // =============================================================================
     // 4. TRADING LOGIC DỰA TRÊN BOX
     // =============================================================================
@@ -10285,7 +10304,7 @@ CheckLastOrderClosed(); // Đóng tất cả nếu lệnh cuối đóng
 // Chỉ thử mở nếu không có lệnh trong hướng đó (tránh xung đột)
 // SCALPING PRIORITY 1: AI Imbalance (Cao nhất - mở lệnh khi có tín hiệu AI mạnh)
 // Chỉ thử mở nếu không có lệnh trong hướng đó (tránh xung đột)
-if (g_TotalOrders_Buy == 0 && g_TotalOrders_Sell == 0)
+if (g_TotalOrders_Buy == 0 || g_TotalOrders_Sell == 0)
 {
     // Thử mở lệnh bằng chiến thuật AI Imbalance
     if (OpenOrderByAIImbalance())
@@ -10293,13 +10312,15 @@ if (g_TotalOrders_Buy == 0 && g_TotalOrders_Sell == 0)
     }
     else 
     {
-        // ❌ Chiến thuật AI không mở được lệnh -> thử chiến thuật 2
-        RunFlexibleZoneStrategy();
+ 
+        
         
         // Kiểm tra xem có lệnh mới được mở không
         if (g_TotalOrders_Buy == 0 && g_TotalOrders_Sell == 0)
         {
+
 HandleSingleDirectionEntry();
+
         }
     }
 }
@@ -10308,8 +10329,14 @@ HandleSingleDirectionEntry();
 
 // ModifyOrdersTPEnhanced(currentPrice); // DISABLED
   // A. INSIDE BOX → SIDEWAY TRADING
-    double marketRange = CalculateMarketRange();
-   if(marketRange < g_CurrentAIThreshold && g_TotalOrders_Buy == 0 && g_TotalOrders_Sell == 0) {
+
+              if(g_InsideBox > g_CurrentAIThreshold ) {
+                   RunFlexibleZoneStrategy();
+
+   CloseAllPositionsEarly(10,100);
+}
+
+   if(g_InsideBox < g_CurrentAIThreshold && g_TotalOrders_Buy == 0 && g_TotalOrders_Sell == 0) {
     // Narrow range checks (bổ sung cho sideway)
   HandleRegularDCA();
     OrderFlowStrength flowStrength = AnalyzeOrderFlowAdvanced();
@@ -10331,6 +10358,7 @@ HandleSingleDirectionEntry();
     if(g_TotalOrders_Sell == 0) canOpenNewTrade_Sell = true;
     return;
 }
+
     
     // B. OUTSIDE BOX → SINGLE DIRECTION (TREND)
     
@@ -12624,6 +12652,7 @@ bool RunFlexibleZoneStrategy() {
     switch(g_CurrentMode) {
        case MODE_NORMAL:
        ManageFlexibleZoneStrategy();
+       
             break;
             
             
@@ -12639,7 +12668,6 @@ bool RunFlexibleZoneStrategy() {
                 
                 if(canTradeBuyZone || canTradeSellZone) {
            ManagePriceZoneStrategy();
-ManageZoneDCA();
               
                 }
             }

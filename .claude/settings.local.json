@@ -3,7 +3,9 @@
     "allow": [
       "Bash(mkdir:*)",
       "Bash(tree:*)",
-      "Bash(find:*)"
+      "Bash(find:*)",
+      "Bash(dir /s /b *.mq4 *.mq5 2)",
+      "Bash(nul)"
     ],
     "deny": [],
     "ask": []
