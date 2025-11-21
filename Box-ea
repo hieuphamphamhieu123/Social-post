@@ -271,7 +271,7 @@ const int MIN_ORDER_MOD_INTERVAL = 5; // 5 seconds minimum between modifications
 datetime g_LastAIOrderTime = 0;
 bool g_AI_OrderPending = false; // Flag để ngăn mở trùng lặp trong cùng 1 tick
 const int AI_ORDER_COOLDOWN = 1; // 60 seconds cooldown between AI imbalance orders
-const double AI_MIN_IMBALANCE_THRESHOLD = 0.01; // Minimum imbalance strength (15% imbalance on -1 to +1 scale)
+const double AI_MIN_IMBALANCE_THRESHOLD = 0.05; // Minimum imbalance strength (15% imbalance on -1 to +1 scale)
 
 input group "===== CÀI ??T B?O V? TIN T?C ====="
 input bool EnableNewsProtection = true;     // B?t/t?t b?o v? tin t?c
@@ -10294,7 +10294,8 @@ CheckLastOrderClosed(); // Đóng tất cả nếu lệnh cuối đóng
               if(g_InsideBox > g_CurrentAIThreshold ) {
               if (g_TotalOrders_Buy == 0 && g_TotalOrders_Sell == 0)
 {
-RunFlexibleZoneStrategy();}
+RunFlexibleZoneStrategy();
+}
                  CloseAllPositionsEarly(10,100);
 
               return;
@@ -10306,12 +10307,12 @@ RunFlexibleZoneStrategy();}
 // Chỉ thử mở nếu không có lệnh trong hướng đó (tránh xung đột)
 // SCALPING PRIORITY 1: AI Imbalance (Cao nhất - mở lệnh khi có tín hiệu AI mạnh)
 // Chỉ thử mở nếu không có lệnh trong hướng đó (tránh xung đột)
-if (g_TotalOrders_Buy == 0 || g_TotalOrders_Sell == 0)
+if (g_TotalOrders_Buy == 0 && g_TotalOrders_Sell == 0)
 {
     // Thử mở lệnh bằng chiến thuật AI Imbalance
     if (OpenOrderByAIImbalance())
     {
-    CleanupPendingZoneOrders();
+CancelAllZonePendingOrders();
     }
     else 
     {
@@ -10321,6 +10322,8 @@ if (g_TotalOrders_Buy == 0 || g_TotalOrders_Sell == 0)
         // Kiểm tra xem có lệnh mới được mở không
         if (g_TotalOrders_Buy == 0 && g_TotalOrders_Sell == 0)
         {
+        if (g_InsideBox < g_CurrentAIThreshold ){
+  HandleRegularDCA();}
 
 HandleSingleDirectionEntry();
 
@@ -10334,9 +10337,9 @@ HandleSingleDirectionEntry();
 // ModifyOrdersTPEnhanced(currentPrice); // DISABLED
   // A. INSIDE BOX → SIDEWAY TRADING
 
-   if(g_InsideBox < g_CurrentAIThreshold && g_TotalOrders_Buy == 0 && g_TotalOrders_Sell == 0) {
+   if(g_TotalOrders_Buy == 0 && g_TotalOrders_Sell == 0 &&g_InsideBox < g_CurrentAIThreshold ) {
     // Narrow range checks (bổ sung cho sideway)
-  HandleRegularDCA();
+  CancelAllZonePendingOrders();
     OrderFlowStrength flowStrength = AnalyzeOrderFlowAdvanced();
     if(flowStrength == FLOW_STRONG_SELL && g_TotalOrders_Buy > 0) return;
 
@@ -11020,7 +11023,6 @@ void CheckActivatedZoneOrders() {
                 g_ActivatedBuyCount++;
 
                 // NEW: Cancel all other zone pending orders when new position detected
-                Print("New Zone BUY position detected (Cycle ", cycleId, "). Cancelling all zone pending orders...");
                 CancelAllZonePendingOrders();
             }
         } else { // POSITION_TYPE_SELL
@@ -11042,7 +11044,7 @@ void CheckActivatedZoneOrders() {
                 g_ActivatedSellCount++;
 
                 // NEW: Cancel all other zone pending orders when new position detected
-                Print("New Zone SELL position detected (Cycle ", cycleId, "). Cancelling all zone pending orders...");
+
                 CancelAllZonePendingOrders();
             }
         }
@@ -11098,7 +11100,7 @@ void CheckActivatedZoneOrders() {
                                         g_ActivatedBuyCount++;
 
                                         // NEW: Cancel all other zone pending orders when one is activated
-                                        Print("Zone BUY order activated (Cycle ", cycleId, "). Cancelling all other zone pending orders...");
+
                                         CancelAllZonePendingOrders();
 
                                         break;
@@ -11166,7 +11168,7 @@ void CheckActivatedZoneOrders() {
                                         g_ActivatedSellCount++;
 
                                         // NEW: Cancel all other zone pending orders when one is activated
-                                        Print("Zone SELL order activated (Cycle ", cycleId, "). Cancelling all other zone pending orders...");
+
                                         CancelAllZonePendingOrders();
 
                                         break;
@@ -11693,22 +11695,20 @@ void CancelAllZonePendingOrders() {
     }
 
     if(totalZoneOrders == 0) {
-        Print("[CancelAllZonePendingOrders] No zone pending orders found");
+
         return;
     }
 
-    Print("[CancelAllZonePendingOrders] Found ", totalZoneOrders, " zone pending orders. Attempting to delete...");
+
 
     // Now delete them
     for(int i = OrdersTotal() - 1; i >= 0; i--) {
         ulong ticket = OrderGetTicket(i);
         if(ticket == 0) {
-            Print("[CancelAllZonePendingOrders] Failed to get ticket at index ", i);
             continue;
         }
 
         if(!OrderSelect(ticket)) {
-            Print("[CancelAllZonePendingOrders] Failed to select order #", ticket);
             continue;
         }
 
@@ -11719,23 +11719,17 @@ void CancelAllZonePendingOrders() {
             ENUM_ORDER_TYPE orderType = (ENUM_ORDER_TYPE)OrderGetInteger(ORDER_TYPE);
             double orderPrice = OrderGetDouble(ORDER_PRICE_OPEN);
 
-            Print("[CancelAllZonePendingOrders] Attempting to delete order #", ticket,
-                  " Type: ", EnumToString(orderType),
-                  " Price: ", orderPrice,
-                  " Comment: ", comment);
 
             if(trade.OrderDelete(ticket)) {
                 deletedCount++;
-                Print("[CancelAllZonePendingOrders] Successfully deleted order #", ticket);
             } else {
                 int error = GetLastError();
-                Print("[CancelAllZonePendingOrders] FAILED to delete order #", ticket,
-                      " Error: ", error, " - ", ErrorDescription(error));
+              
             }
         }
     }
 
-    Print("[CancelAllZonePendingOrders] Deleted ", deletedCount, " out of ", totalZoneOrders, " zone pending orders");
+
 
     // Reset zone tracking variables
     for(int i = 0; i < g_BuyZonesCount; i++) {
